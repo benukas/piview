@@ -248,6 +248,23 @@ class Piview:
                     if result.returncode != 0:
                         self.log("X server not responding, may need restart", 'warning')
                 
+                # Check network connectivity (for failover)
+                url = self.config.get("url", "")
+                if url and time.time() - self.last_url_check > 30:  # Check every 30 seconds
+                    if not self.check_url_connectivity(url):
+                        self.consecutive_network_failures += 1
+                        self.log(f"Network connectivity check failed ({self.consecutive_network_failures} consecutive)", 'warning')
+                        
+                        # Trigger failover after 3 consecutive failures
+                        if self.consecutive_network_failures >= 3 and not self.network_failover_triggered:
+                            self.force_network_failover()
+                    else:
+                        self.consecutive_network_failures = 0
+                        if self.network_failover_triggered:
+                            self.log("Network connectivity restored", 'info')
+                            self.network_failover_triggered = False
+                    self.last_url_check = time.time()
+                
                 # Re-apply screen blanking prevention
                 self.prevent_screen_blanking()
                 
