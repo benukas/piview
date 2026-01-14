@@ -577,7 +577,7 @@ sudo tee $CONFIG_DIR/config.json > /dev/null << EOF
   "ignore_ssl_errors": $IGNORE_SSL,
   "cert_installed": ${CERT_INSTALLED:-false},
   "connection_retry_delay": 5,
-  "max_connection_retries": 3,
+  "max_connection_retries": 3$FAILOVER_JSON,
   "kiosk_flags": [
     "--kiosk",
     "--noerrdialogs",
