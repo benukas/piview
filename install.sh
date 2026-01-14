@@ -22,25 +22,28 @@ if [ "$EUID" -eq 0 ]; then
    exit 1
 fi
 
-# Create temporary directory in home to persist if needed
-TMP_DIR="$HOME/piview-install-$$"
-mkdir -p "$TMP_DIR"
-cd "$TMP_DIR"
+# Download to a persistent location so user can run setup interactively
+INSTALL_DIR="$HOME/piview-install"
+mkdir -p "$INSTALL_DIR"
+cd "$INSTALL_DIR"
 
 echo "Downloading Piview..."
 # Download the repository files
 curl -sSL https://github.com/benukas/piview/archive/refs/heads/main.tar.gz -o piview.tar.gz
-tar -xzf piview.tar.gz
-cd piview-main
+tar -xzf piview.tar.gz --strip-components=1
+rm -f piview.tar.gz
 
 # Make scripts executable
 chmod +x setup.sh
 
-# Run setup (this will prompt for URL, refresh interval, WiFi, etc.)
 echo ""
 echo -e "${GREEN}=========================================="
-echo "Starting Piview Setup"
+echo "Download Complete!"
 echo "==========================================${NC}"
+echo ""
+echo "Files downloaded to: $INSTALL_DIR"
+echo ""
+echo "Now running setup interactively..."
 echo ""
 echo "You will be prompted to configure:"
 echo "  - WiFi (optional)"
@@ -49,14 +52,16 @@ echo "  - Refresh interval"
 echo "  - SSL certificate handling"
 echo "  - Read-only mode (optional)"
 echo ""
+sleep 2
 
-# Force interactive mode - run setup.sh directly (not piped)
-# This ensures prompts work properly
-exec bash ./setup.sh
+# Run setup.sh in a new shell session to ensure interactivity
+bash ./setup.sh
 
-# Cleanup (only reached if setup.sh exits without exec)
-cd /
-rm -rf "$TMP_DIR"
+# Cleanup after setup completes
+echo ""
+echo "Cleaning up temporary files..."
+cd "$HOME"
+rm -rf "$INSTALL_DIR"
 
 echo ""
 echo -e "${GREEN}=========================================="
