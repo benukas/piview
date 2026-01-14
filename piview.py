@@ -839,20 +839,17 @@ class Piview:
                 self.keep_screen_alive()
                 self.last_screen_keepalive = time.time()
             
-            # Check if browser is still running
+            # Check if browser is still running - restart immediately if it died
             if self.browser_process:
                 if self.browser_process.poll() is not None:
-                    self.log("Browser process died, restarting...", 'warning')
+                    self.log("Browser process died, restarting immediately...", 'warning')
                     consecutive_failures += 1
-                    if consecutive_failures < 5:
-                        self.restart_browser()
-                        last_refresh = time.time()
-                    else:
-                        self.log("Too many consecutive failures, waiting longer...", 'error')
-                        time.sleep(30)
+                    # Restart immediately - don't wait
+                    self.restart_browser()
+                    last_refresh = time.time()
+                    # Reset failure count after successful restart
+                    if self.browser_process and self.browser_process.poll() is None:
                         consecutive_failures = 0
-                        self.restart_browser()
-                        last_refresh = time.time()
                 else:
                     consecutive_failures = 0
                     
