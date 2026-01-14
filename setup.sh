@@ -804,12 +804,6 @@ fi
 OVEREOF
 sudo chmod +x /usr/local/bin/overlayroot.sh
 
-echo "" >&2
-ask_tty_yn "Enable read-only mode for SD card now? (recommended for factory use)" READONLY_REPLY "n"
-if [[ $READONLY_REPLY =~ ^[Yy]$ ]]; then
-    sudo /usr/local/bin/overlayroot.sh enable
-fi
-
 # Install additional tools for screen management
 echo "Installing additional screen management tools..."
 # Note: tvservice is deprecated on newer firmware but kept for compatibility
