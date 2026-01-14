@@ -58,9 +58,11 @@ DEFAULT_CONFIG = {
 
 class Piview:
     def __init__(self):
+        # Initialize logger FIRST - before anything else that might use it
+        self.logger = None
+        
         self.running = True
         self.browser_process = None
-        self.config = self.load_config()
         self.browser_restart_count = 0
         self.last_browser_check = time.time()
         self.last_screen_keepalive = time.time()
@@ -68,8 +70,11 @@ class Piview:
         self.connection_failures = 0
         self.last_url_check = 0
         
-        # Setup logging
+        # Setup logging (must be early)
         self.setup_logging()
+        
+        # Load config after logging is ready
+        self.config = self.load_config()
         
         # Setup signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self.signal_handler)
@@ -86,19 +91,45 @@ class Piview:
     
     def setup_logging(self):
         """Setup logging to file and console"""
+        # Always initialize logger to None first
+        self.logger = None
+        
         try:
-            LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-            logging.basicConfig(
-                level=logging.INFO,
-                format='%(asctime)s - %(levelname)s - %(message)s',
-                handlers=[
-                    logging.FileHandler(LOG_FILE),
-                    logging.StreamHandler(sys.stdout)
-                ]
-            )
+            # Ensure log directory exists
+            try:
+                LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                # Can't create directory, use fallback
+                print(f"Warning: Could not create log directory: {e}", file=sys.stderr)
+                return
+            
+            # Try to set up file logging
+            try:
+                file_handler = logging.FileHandler(LOG_FILE)
+                file_handler.setLevel(logging.INFO)
+                file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+            except Exception as e:
+                # Can't create file handler, continue with console only
+                print(f"Warning: Could not create log file: {e}", file=sys.stderr)
+                file_handler = None
+            
+            # Set up console handler
+            console_handler = logging.StreamHandler(sys.stdout)
+            console_handler.setLevel(logging.INFO)
+            console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+            
+            # Configure logger
             self.logger = logging.getLogger(__name__)
-        except Exception:
-            # Fallback to simple print if logging fails
+            self.logger.setLevel(logging.INFO)
+            self.logger.handlers.clear()  # Clear any existing handlers
+            
+            if file_handler:
+                self.logger.addHandler(file_handler)
+            self.logger.addHandler(console_handler)
+            
+        except Exception as e:
+            # Complete fallback - just use print
+            print(f"Warning: Logging setup failed: {e}", file=sys.stderr)
             self.logger = None
     
     def log(self, message, level='info'):
