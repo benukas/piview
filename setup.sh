@@ -1,8 +1,44 @@
 #!/bin/bash
 # Piview - One-shot setup script for Raspberry Pi OS Lite
 # Sets up kiosk mode with read-only SD card, NTP sync, and auto-start
+# Pipe-safe: Works even when piped via curl | bash
 
 set -e
+
+# Helper function to ask questions that work even when piped
+ask_tty() {
+    local prompt_text=$1
+    local var_name=$2
+    local default_val=$3
+    
+    # Send prompt to stderr (screen) so it shows even when piped
+    echo -n "$prompt_text [$default_val]: " >&2
+    
+    # Read from terminal, not from pipe
+    read -r response </dev/tty 2>/dev/null || response="$default_val"
+    
+    if [ -z "$response" ]; then
+        eval "$var_name=\"$default_val\""
+    else
+        eval "$var_name=\"$response\""
+    fi
+}
+
+ask_tty_yn() {
+    local prompt_text=$1
+    local var_name=$2
+    local default_val=$3
+    
+    echo -n "$prompt_text [$default_val]: " >&2
+    read -n 1 response </dev/tty 2>/dev/null || response="$default_val"
+    echo "" >&2
+    
+    if [ -z "$response" ]; then
+        response="$default_val"
+    fi
+    
+    eval "$var_name=\"$response\""
+}
 
 echo "=========================================="
 echo "Piview - Pi OS Lite Setup"
@@ -41,14 +77,10 @@ echo "WiFi Configuration"
 echo "=========================================="
 echo ""
 if [ "$IS_VIRTUALBOX" = true ]; then
-    echo "Skipping WiFi configuration (VirtualBox uses host network)"
-    echo -n "Configure WiFi anyway? (y/n) [default: n]: "
-    read -n 1 CONFIGURE_WIFI
-    echo ""
+    echo "Skipping WiFi configuration (VirtualBox uses host network)" >&2
+    ask_tty_yn "Configure WiFi anyway?" CONFIGURE_WIFI "n"
 else
-    echo -n "Configure WiFi? (y/n) [default: n]: "
-    read -n 1 CONFIGURE_WIFI
-    echo ""
+    ask_tty_yn "Configure WiFi?" CONFIGURE_WIFI "n"
 fi
 
 if [[ $CONFIGURE_WIFI =~ ^[Yy]$ ]]; then
@@ -58,17 +90,14 @@ if [[ $CONFIGURE_WIFI =~ ^[Yy]$ ]]; then
     sudo apt-get install -y wpasupplicant wireless-tools || true
     
     # Get WiFi SSID
-    echo ""
-    echo -n "Enter WiFi SSID (network name): "
-    read WIFI_SSID
+    echo "" >&2
+    ask_tty "Enter WiFi SSID (network name)" WIFI_SSID ""
     if [ -z "$WIFI_SSID" ]; then
-        echo "No SSID provided, skipping WiFi configuration."
+        echo "No SSID provided, skipping WiFi configuration." >&2
     else
         # Ask if password protected
-        echo ""
-        echo -n "Is this network password protected? (WPA2) (y/n): "
-        read -n 1 WIFI_PASS_REPLY
-        echo ""
+        echo "" >&2
+        ask_tty_yn "Is this network password protected? (WPA2)" WIFI_PASS_REPLY "y"
         
         # Backup existing wpa_supplicant.conf
         if [ -f /etc/wpa_supplicant/wpa_supplicant.conf ]; then
@@ -76,10 +105,12 @@ if [[ $CONFIGURE_WIFI =~ ^[Yy]$ ]]; then
         fi
         
         if [[ $WIFI_PASS_REPLY =~ ^[Yy]$ ]]; then
-            # WPA2 network - get password
-            echo -n "Enter WiFi password: "
-            read -s WIFI_PASSWORD
-            echo ""
+            # WPA2 network - get password (hidden)
+            echo -n "Enter WiFi password: " >&2
+            stty -echo </dev/tty 2>/dev/null || true
+            read -r WIFI_PASSWORD </dev/tty 2>/dev/null || WIFI_PASSWORD=""
+            stty echo </dev/tty 2>/dev/null || true
+            echo "" >&2
             
             # Generate PSK if wpa_passphrase is available
             if command -v wpa_passphrase &> /dev/null; then
@@ -91,10 +122,7 @@ if [[ $CONFIGURE_WIFI =~ ^[Yy]$ ]]; then
             fi
             
             # Ask for country code (required for WiFi on Pi)
-            echo ""
-            echo -n "Enter country code (e.g., US, GB, DE) [default: US]: "
-            read COUNTRY_CODE
-            COUNTRY_CODE=${COUNTRY_CODE:-US}
+            ask_tty "Enter country code (e.g., US, GB, DE)" COUNTRY_CODE "US"
             
             # Configure wpa_supplicant.conf
             echo "Configuring WiFi (WPA2)..."
@@ -111,10 +139,7 @@ network={
 WPAEOF
         else
             # Open network (no password)
-            echo ""
-            echo -n "Enter country code (e.g., US, GB, DE) [default: US]: "
-            read COUNTRY_CODE
-            COUNTRY_CODE=${COUNTRY_CODE:-US}
+            ask_tty "Enter country code (e.g., US, GB, DE)" COUNTRY_CODE "US"
             
             echo "Configuring WiFi (open network)..."
             sudo tee /etc/wpa_supplicant/wpa_supplicant.conf > /dev/null << WPAEOF
@@ -276,35 +301,26 @@ CONFIG_DIR="/etc/piview"
 sudo mkdir -p $CONFIG_DIR
 
 # Configuration prompts
-echo ""
-echo "=========================================="
-echo "Configuration"
-echo "=========================================="
-echo ""
+echo "" >&2
+echo "==========================================" >&2
+echo "Configuration" >&2
+echo "==========================================" >&2
+echo "" >&2
 
-# Always prompt - force interactive mode
 # Get URL from user or use default
-echo -n "Enter the URL to display (or press Enter for default): "
-read USER_URL
-USER_URL=${USER_URL:-"https://example.com"}
-echo ""
+ask_tty "Enter the URL to display" USER_URL "https://example.com"
 
 # Get refresh interval
-echo -n "Enter refresh interval in seconds (default: 60): "
-read REFRESH_INTERVAL
-REFRESH_INTERVAL=${REFRESH_INTERVAL:-60}
-echo ""
+ask_tty "Enter refresh interval (seconds)" REFRESH_INTERVAL "60"
 
 # Ask about SSL certificate handling
-echo -n "Ignore SSL certificate errors? (recommended for factory/internal networks) (y/n) [default: y]: "
-read -n 1 SSL_REPLY
-echo ""
+ask_tty_yn "Ignore SSL certificate errors? (recommended for factory/internal networks)" SSL_REPLY "y"
 if [[ $SSL_REPLY =~ ^[Yy]$ ]] || [ -z "$SSL_REPLY" ]; then
     IGNORE_SSL="true"
 else
     IGNORE_SSL="false"
 fi
-echo ""
+echo "" >&2
 
 # Create config file
 echo "Creating configuration..."
@@ -526,10 +542,8 @@ fi
 OVEREOF
 sudo chmod +x /usr/local/bin/overlayroot.sh
 
-echo ""
-echo -n "Enable read-only mode for SD card now? (recommended for factory use) (y/n) [default: n]: "
-read -n 1 READONLY_REPLY
-echo ""
+echo "" >&2
+ask_tty_yn "Enable read-only mode for SD card now? (recommended for factory use)" READONLY_REPLY "n"
 if [[ $READONLY_REPLY =~ ^[Yy]$ ]]; then
     sudo /usr/local/bin/overlayroot.sh enable
 fi

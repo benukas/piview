@@ -33,19 +33,10 @@ chmod +x setup.sh
 echo ""
 echo -e "${GREEN}Download complete!${NC}"
 echo ""
-echo "Now run the setup script:"
-echo "  cd $INSTALL_DIR"
-echo "  ./setup.sh"
+echo "Running setup now (prompts will work even when piped)..."
 echo ""
-echo "Or run it now? (y/n)"
-read -n 1 RUN_NOW
-echo ""
+./setup.sh
 
-if [[ $RUN_NOW =~ ^[Yy]$ ]]; then
-    ./setup.sh
-    cd "$HOME"
-    rm -rf "$INSTALL_DIR"
-else
-    echo "Setup files are in: $INSTALL_DIR"
-    echo "Run './setup.sh' there when ready."
-fi
+# Cleanup
+cd "$HOME"
+rm -rf "$INSTALL_DIR"
