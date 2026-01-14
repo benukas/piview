@@ -656,6 +656,13 @@ class Piview:
         self.log("Press Ctrl+C to stop Piview")
         self.log("=" * 50)
         
+        # Wait for X server to be ready first
+        if not self.wait_for_x_server(max_wait=60):
+            self.log("X server not available. Will keep retrying...", 'error')
+            # Don't exit - keep trying
+        else:
+            self.log("X server is ready")
+        
         # Aggressively prevent screen blanking at start
         for _ in range(3):
             self.prevent_screen_blanking()
@@ -670,24 +677,25 @@ class Piview:
         
         # Open browser with retry - more aggressive
         max_retries = 10
+        browser_opened = False
         for attempt in range(max_retries):
             if self.open_url(url):
+                browser_opened = True
                 break
             if attempt < max_retries - 1:
                 wait_time = min(5 + attempt, 15)  # Progressive backoff
                 self.log(f"Failed to open browser, retrying ({attempt + 1}/{max_retries}) in {wait_time}s...", 'warning')
                 time.sleep(wait_time)
                 self.prevent_screen_blanking()
-                # Try to fix X server issues
-                if os.environ.get('DISPLAY'):
-                    try:
-                        subprocess.run(["xset", "q"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
-                    except:
-                        self.log("X server may have issues, continuing anyway...", 'warning')
+                # Re-check X server
+                if not self.wait_for_x_server(max_wait=10):
+                    self.log("X server lost, waiting longer...", 'warning')
+                    time.sleep(10)
             else:
-                self.log("Failed to open browser after all retries. Will keep trying...", 'error')
-                # Don't exit - keep trying in the main loop
-                time.sleep(30)
+                self.log("Failed to open browser after all retries. Will keep trying in main loop...", 'error')
+        
+        if not browser_opened:
+            self.log("Browser not opened initially, will retry in main loop", 'warning')
         
         # Main loop - refresh periodically and monitor
         last_refresh = time.time()
