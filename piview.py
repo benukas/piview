@@ -73,6 +73,8 @@ class Piview:
         self.last_health_check = time.time()
         self.connection_failures = 0
         self.last_url_check = 0
+        self.consecutive_network_failures = 0
+        self.network_failover_triggered = False
         
         # Setup logging (must be early)
         self.setup_logging()
@@ -497,11 +499,108 @@ class Piview:
                 # HTTP error but connection works
                 return e.code < 500
             except (urllib.error.URLError, Exception) as e:
-                self.log(f"URL connectivity check failed: {e}", 'warning')
+                # Don't log every failure - only log if it's a persistent issue
                 return False
         except Exception as e:
-            self.log(f"Connectivity check error: {e}", 'warning')
             return False
+    
+    def find_ethernet_interface(self):
+        """Find the ethernet interface name"""
+        interfaces = ["eth0", "enp1s0", "enx", "enp2s0"]  # Common ethernet names
+        for iface in interfaces:
+            if os.path.exists(f"/sys/class/net/{iface}"):
+                return iface
+        # Try to find any ethernet interface
+        if os.path.exists("/sys/class/net"):
+            for iface in os.listdir("/sys/class/net"):
+                if iface.startswith("eth") or iface.startswith("en"):
+                    # Check if it's not a WiFi interface
+                    if not iface.startswith("wlan") and not iface.startswith("wlp"):
+                        return iface
+        return None
+    
+    def find_wifi_interface(self):
+        """Find the WiFi interface name"""
+        interfaces = ["wlan0", "wlp1s0", "wlp2s0"]  # Common WiFi names
+        for iface in interfaces:
+            if os.path.exists(f"/sys/class/net/{iface}"):
+                return iface
+        # Try to find any WiFi interface
+        if os.path.exists("/sys/class/net"):
+            for iface in os.listdir("/sys/class/net"):
+                if iface.startswith("wlan") or iface.startswith("wlp"):
+                    return iface
+        return None
+    
+    def force_network_failover(self):
+        """
+        If LAN is acting up but technically 'connected', 
+        force it down to trigger the WiFi failover.
+        """
+        self.log("Connectivity lost on primary port. Forcing network failover...", 'warning')
+        self.network_failover_triggered = True
+        
+        eth_interface = self.find_ethernet_interface()
+        wifi_interface = self.find_wifi_interface()
+        
+        if not eth_interface:
+            self.log("No ethernet interface found, skipping failover", 'warning')
+            return
+        
+        if not wifi_interface:
+            self.log("No WiFi interface found, cannot failover", 'error')
+            return
+        
+        try:
+            # Try NetworkManager first (modern Pi OS)
+            if subprocess.run(["which", "nmcli"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+                self.log(f"Using NetworkManager to disconnect {eth_interface}...", 'info')
+                subprocess.run(
+                    ["sudo", "nmcli", "device", "disconnect", eth_interface],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                    check=False
+                )
+                # Ensure WiFi is connected
+                subprocess.run(
+                    ["sudo", "nmcli", "device", "connect", wifi_interface],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                    check=False
+                )
+            else:
+                # Fallback to traditional networking
+                self.log(f"Using traditional networking to bring down {eth_interface}...", 'info')
+                subprocess.run(
+                    ["sudo", "ifdown", eth_interface],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                    check=False
+                )
+                # Bring WiFi up
+                subprocess.run(
+                    ["sudo", "ifup", wifi_interface],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                    check=False
+                )
+            
+            self.log(f"Network failover triggered: {eth_interface} -> {wifi_interface}", 'warning')
+            self.log("Waiting for WiFi to establish connection...", 'info')
+            time.sleep(5)
+            
+            # Verify WiFi is working
+            if self.check_url_connectivity(self.config.get("url", "")):
+                self.log("WiFi failover successful - connectivity restored", 'info')
+            else:
+                self.log("WiFi failover completed but connectivity not yet restored", 'warning')
+                
+        except Exception as e:
+            self.log(f"Error during network failover: {e}", 'error')
     
     def open_url(self, url):
         """Open a URL in kiosk mode with error handling and connection verification"""

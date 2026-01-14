@@ -224,6 +224,63 @@ else
     echo "Skipping package upgrades (install-only mode)"
 fi
 
+# Configure network failover (LAN priority with WiFi fallback)
+echo "Configuring network failover (LAN priority, WiFi fallback)..."
+if command -v nmcli &> /dev/null; then
+    # NetworkManager is available - set up metrics for failover
+    ETH_INTERFACE=""
+    WIFI_INTERFACE=""
+    
+    # Find ethernet interface
+    if [ -d /sys/class/net/eth0 ]; then
+        ETH_INTERFACE="eth0"
+    else
+        for iface in /sys/class/net/eth* /sys/class/net/en*; do
+            if [ -d "$iface" ]; then
+                ETH_INTERFACE=$(basename "$iface")
+                break
+            fi
+        done
+    fi
+    
+    # Find WiFi interface (already detected earlier if WiFi was configured)
+    if [ -z "$WIFI_INTERFACE" ]; then
+        if [ -d /sys/class/net/wlan0 ]; then
+            WIFI_INTERFACE="wlan0"
+        else
+            for iface in /sys/class/net/wlan* /sys/class/net/wlp*; do
+                if [ -d "$iface" ]; then
+                    WIFI_INTERFACE=$(basename "$iface")
+                    break
+                fi
+            done
+        fi
+    fi
+    
+    # Configure metrics if interfaces found
+    if [ -n "$ETH_INTERFACE" ]; then
+        # Set Ethernet to higher priority (lower metric = higher priority)
+        ETH_CONN=$(nmcli -t -f NAME,DEVICE connection show | grep "$ETH_INTERFACE" | cut -d: -f1 | head -1)
+        if [ -n "$ETH_CONN" ]; then
+            sudo nmcli connection modify "$ETH_CONN" ipv4.route-metric 100 2>/dev/null || true
+            echo "  ✓ Ethernet ($ETH_INTERFACE) set to priority 1 (metric 100)"
+        fi
+    fi
+    
+    if [ -n "$WIFI_INTERFACE" ]; then
+        # Set WiFi to lower priority (higher metric = lower priority)
+        WIFI_CONN=$(nmcli -t -f NAME,DEVICE connection show | grep "$WIFI_INTERFACE" | cut -d: -f1 | head -1)
+        if [ -n "$WIFI_CONN" ]; then
+            sudo nmcli connection modify "$WIFI_CONN" ipv4.route-metric 200 2>/dev/null || true
+            echo "  ✓ WiFi ($WIFI_INTERFACE) set to priority 2 (metric 200)"
+            echo "  ✓ Network failover configured: LAN preferred, WiFi fallback"
+        fi
+    fi
+else
+    echo "  Note: NetworkManager not available, using traditional networking"
+    echo "  Network failover will be handled by Piview's health check"
+fi
+
 # Install dependencies
 echo "Installing dependencies..."
 # Check if we're on Raspberry Pi Desktop (has GUI) or Lite (needs X server)
