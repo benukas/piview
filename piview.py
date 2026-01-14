@@ -52,7 +52,11 @@ DEFAULT_CONFIG = {
         "--ignore-certificate-errors-spki-list",
         "--allow-running-insecure-content",
         "--disable-web-security",
-        "--test-type"
+        "--test-type",
+        "--unsafely-treat-insecure-origin-as-secure",
+        "--allow-insecure-localhost",
+        "--ignore-certificate-errors-spki-list",
+        "--user-data-dir=/tmp/chromium-ssl-bypass"
     ]
 }
 
@@ -549,17 +553,26 @@ class Piview:
         # Build browser command with SSL flags if needed
         kiosk_flags = self.config["kiosk_flags"].copy()
         
-        # Add SSL bypass flags if configured
+        # Ensure SSL bypass flags are present if configured
+        # These flags should prevent SSL warnings from appearing at all
         if self.config.get("ignore_ssl_errors", True):
+            # Create a temporary user data dir to avoid SSL certificate storage issues
+            import tempfile
+            ssl_user_data = tempfile.mkdtemp(prefix="chromium-ssl-")
+            
+            # Add/update SSL bypass flags
             ssl_flags = [
                 "--ignore-certificate-errors",
                 "--ignore-ssl-errors",
                 "--ignore-certificate-errors-spki-list",
-                "--allow-running-insecure-content"
+                "--allow-running-insecure-content",
+                "--unsafely-treat-insecure-origin-as-secure",
+                f"--user-data-dir={ssl_user_data}"
             ]
             # Add flags that aren't already in the list
             for flag in ssl_flags:
-                if flag not in kiosk_flags:
+                flag_name = flag.split("=")[0] if "=" in flag else flag
+                if not any(f.startswith(flag_name) for f in kiosk_flags):
                     kiosk_flags.append(flag)
         
         cmd = [browser_cmd] + kiosk_flags + [url]
@@ -583,10 +596,9 @@ class Piview:
             
             self.log(f"Browser opened successfully: {url}")
             
-            # After opening, try to dismiss any SSL warnings
-            if self.config.get("ignore_ssl_errors", True):
-                time.sleep(2)
-                self.dismiss_ssl_warnings()
+            # SSL errors should be bypassed by flags - no need for xdotool
+            # The combination of --ignore-certificate-errors and --disable-web-security
+            # should prevent SSL warnings from appearing
             
             return True
         except FileNotFoundError:
