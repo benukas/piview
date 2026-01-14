@@ -423,14 +423,11 @@ sudo tee $CONFIG_DIR/config.json > /dev/null << EOF
     "--disable-background-networking",
     "--disable-default-apps",
     "--disable-sync",
-    "--ignore-certificate-errors",
-    "--ignore-ssl-errors",
-    "--ignore-certificate-errors-spki-list",
-    "--allow-running-insecure-content",
-    "--disable-web-security",
-    "--test-type",
-    "--unsafely-treat-insecure-origin-as-secure",
-    "--allow-insecure-localhost"
+    "--disable-dev-shm-usage",
+    "--no-sandbox",
+    "--disable-gpu",
+    "--disable-software-rasterizer",
+    "--user-data-dir=/tmp/chromium-ssl-bypass"
   ]
 }
 EOF
@@ -639,50 +636,21 @@ sudo apt-get install -y \
 # tvservice may not be available on newer Pi OS - install if available
 sudo apt-get install -y tvservice 2>/dev/null || echo "Note: tvservice not available (deprecated on newer firmware)" || true
 
-# Configure .xinitrc with aggressive screen blanking prevention
+# Configure .xinitrc with screen blanking prevention (simplified - Python handles keepalive)
 if [ "$NEED_X_SERVER" = true ]; then
-    echo "Configuring X server with bulletproof screen settings..."
+    echo "Configuring X server with screen blanking prevention..."
     cat > ~/.xinitrc << 'XINITEOF'
 #!/bin/sh
 # Start Piview - Factory Hardened
+# Screen blanking is handled by: kernel (consoleblank=0) + Python keepalive thread
 
-# Disable screen blanking - MULTIPLE METHODS
-xset s off 2>/dev/null
-xset -dpms 2>/dev/null
-xset s noblank 2>/dev/null
-xset s 0 0 2>/dev/null
-
-# Disable power management
-xset -dpms 2>/dev/null
-xset dpms 0 0 0 2>/dev/null
-
-# Reset screen saver
-xset s reset 2>/dev/null
-
-# Disable console blanking
-setterm -blank 0 -powerdown 0 -powersave off 2>/dev/null
-
-# Wake up HDMI if sleeping
-tvservice -p 2>/dev/null || true
+# Disable screen blanking via X server
+xset s off -dpms s noblank 2>/dev/null || true
 
 # Hide cursor
 unclutter -idle 1 -root &
 
-# Keep screen alive script (runs in background)
-(
-    while true; do
-        sleep 30
-        xset s reset 2>/dev/null
-        xset -dpms 2>/dev/null
-        xset s off 2>/dev/null
-        # Move mouse slightly to prevent blanking
-        xdotool mousemove_relative -- 1 0 2>/dev/null
-        sleep 0.1
-        xdotool mousemove_relative -- -1 0 2>/dev/null
-    done
-) &
-
-# Start Piview
+# Start Piview (Python handles keepalive)
 exec /usr/bin/python3 /opt/piview/piview.py
 XINITEOF
     chmod +x ~/.xinitrc
