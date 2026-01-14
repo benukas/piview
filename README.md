@@ -10,8 +10,10 @@
 - 🔌 **Auto-start** - Runs automatically on boot with aggressive restart policy
 - 💾 **Read-only SD card** - Toggle read-only mode to protect SD card from wear
 - ⏰ **Automatic time sync** - NTP time synchronization
-- ⌨️ **Browser controls** - Close browser with ESC/q key or script
+- ⌨️ **Browser controls** - Close browser with Alt+F4 or script
 - 🎯 **Pi OS Lite optimized** - Works on headless Raspberry Pi OS Lite
+- 🔒 **SSL certificate support** - Install certificates or bypass SSL errors
+- 🛡️ **Hardware watchdog** - Auto-reboot on kernel freeze (optional)
 
 ## Factory-Hardened Features (Bulletproof)
 
@@ -28,6 +30,8 @@
 - 🔁 **Aggressive restart policy** - Systemd service restarts immediately on failure
 - ⚡ **No sleep/suspend** - All system sleep modes disabled
 - 🎯 **Watchdog monitoring** - Background threads monitor and fix issues automatically
+- ✅ **"Exited Cleanly" fix** - Prevents Chromium crash nag bars
+- 🔧 **Hardware watchdog** - Auto-reboots Pi if kernel freezes (optional)
 
 ## Quick Start
 
@@ -43,11 +47,11 @@ That's it! The installer will download and set up everything automatically.
 
 If you prefer to install manually:
 
-1. Download Files
+1. **Download Files**
 
 Transfer `piview.py` and `setup.sh` to your Raspberry Pi.
 
-2. Run Setup
+2. **Run Setup**
 
 ```bash
 chmod +x setup.sh
@@ -66,13 +70,15 @@ The setup script will:
 - Install backup screen keepalive service
 - Set up comprehensive logging
 - Optionally enable read-only SD card mode
+- Optionally configure hardware watchdog
 
 During setup, you'll be prompted for:
 - **WiFi SSID and password** (optional - for Pi OS Lite)
 - The URL to display
 - Refresh interval (seconds)
-- SSL certificate error handling
+- **SSL certificate handling** (install certificate, ignore errors, or use defaults)
 - Whether to enable read-only mode
+- Whether to enable hardware watchdog (recommended for factory)
 
 ### 3. Configure URL
 
@@ -88,7 +94,8 @@ Example configuration:
 {
   "url": "https://example.com",
   "refresh_interval": 60,
-  "browser": "chromium-browser"
+  "browser": "chromium-browser",
+  "ignore_ssl_errors": true
 }
 ```
 
@@ -116,9 +123,27 @@ The configuration file is located at `/etc/piview/config.json`
 - **refresh_interval**: Seconds between auto-refresh (default: 60)
 - **browser**: Browser executable (default: "chromium-browser")
 - **ignore_ssl_errors**: Ignore SSL certificate errors (default: true) - Useful for self-signed certs in factory environments
+- **cert_installed**: Whether SSL certificate was installed locally (set automatically)
 - **connection_retry_delay**: Seconds to wait before retrying failed connections (default: 5)
 - **max_connection_retries**: Maximum retries for connection failures (default: 3)
 - **kiosk_flags**: Browser flags for kiosk mode (usually don't need to change)
+
+### SSL Certificate Options
+
+During setup, you can choose:
+
+1. **Install certificate file** (recommended - most secure)
+   - Provide path to `.crt` or `.pem` file
+   - Certificate is installed to system store and Chromium's NSS database
+   - Chromium will trust the certificate natively
+
+2. **Ignore SSL errors** (for testing/development)
+   - Uses Chromium flags to bypass SSL certificate validation
+   - Useful for self-signed certificates in factory environments
+
+3. **Use system defaults** (no special handling)
+   - Standard SSL validation
+   - Will show errors for self-signed certificates
 
 ### Changing URL
 
@@ -161,11 +186,11 @@ sudo journalctl -u piview.service -f
 ### Closing the Browser
 
 **Method 1: Keyboard**
-- Press `ESC` or `q` key to close browser (it will auto-restart)
+- Press `Alt+F4` to close browser (it will auto-restart)
 
 **Method 2: Script**
 ```bash
-./close_browser.sh
+/opt/piview/close_browser.sh
 ```
 
 **Method 3: Kill process**
@@ -192,6 +217,22 @@ sudo overlayroot.sh status
 
 **Important:** When read-only mode is enabled, you must disable it before making any system changes. After disabling, reboot for changes to take full effect.
 
+### Hardware Watchdog
+
+If enabled during setup, the hardware watchdog will automatically reboot the Pi if the kernel freezes (due to power spikes, RAM glitches, etc.).
+
+**To enable manually:**
+1. Edit `/boot/config.txt` and add: `dtparam=watchdog=on`
+2. Install: `sudo apt-get install watchdog`
+3. Edit `/etc/watchdog.conf` and uncomment: `watchdog-device = /dev/watchdog`
+4. Enable: `sudo systemctl enable --now watchdog`
+5. Reboot for changes to take effect
+
+**To disable:**
+1. Remove `dtparam=watchdog=on` from `/boot/config.txt`
+2. Disable service: `sudo systemctl disable watchdog`
+3. Reboot
+
 ### Time Synchronization
 
 NTP time sync is automatically configured during setup. To manually sync:
@@ -203,15 +244,36 @@ sudo ntpdate -s time.nist.gov
 Or restart the NTP service:
 
 ```bash
+sudo systemctl restart systemd-timesyncd
+# or
 sudo systemctl restart ntp
+```
+
+## Uninstall
+
+To completely remove Piview:
+
+```bash
+# Use the uninstall script (recommended)
+./uninstall.sh
+
+# Or manually:
+sudo systemctl stop piview.service
+sudo systemctl disable piview.service
+sudo rm /etc/systemd/system/piview.service
+sudo rm /etc/systemd/system/piview-keepalive.service
+sudo rm /etc/systemd/system/disable-screen-blanking.service
+sudo systemctl daemon-reload
+sudo rm -rf /opt/piview
+sudo rm -rf /etc/piview  # Optional - removes config
 ```
 
 ## Requirements
 
-- Raspberry Pi (tested on Raspberry Pi OS Lite)
+- Raspberry Pi (tested on Raspberry Pi OS Lite and Desktop)
 - Internet connection (for web pages and NTP)
 - Display connected to Pi
-- Keyboard (optional, for closing browser)
+- Keyboard (optional, for closing browser with Alt+F4)
 
 ## Troubleshooting
 
@@ -220,24 +282,27 @@ sudo systemctl restart ntp
 - Check if Chromium is installed: `which chromium-browser`
 - Install if missing: `sudo apt-get install chromium-browser xserver-xorg xinit`
 - Check X server is running: `echo $DISPLAY`
+- Check logs: `tail -f /var/log/piview.log`
 
 ### URLs not loading / SSL errors / Connection issues
 
-- **SSL Certificate Errors**: Piview is configured by default to ignore SSL errors. Check config: `cat /etc/piview/config.json | grep ignore_ssl_errors`
+- **SSL Certificate Errors**: 
+  - If you installed a certificate, verify it's in the system store: `ls /usr/local/share/ca-certificates/`
+  - If using ignore SSL errors, check config: `cat /etc/piview/config.json | grep ignore_ssl_errors`
 - **Connection Failures**: Piview automatically retries connections. Check logs: `tail -f /var/log/piview.log`
 - Verify internet connection: `ping google.com`
 - Check URLs are accessible: `curl -k <url>` (the -k flag ignores SSL like Piview does)
 - Ensure URLs include `http://` or `https://`
-- If using self-signed certificates, ensure `ignore_ssl_errors` is set to `true` in config
 - Check network connectivity: `curl -v <url>`
 - Browser will automatically restart on connection failures
 
 ### Service won't start
 
 - Check logs: `sudo journalctl -u piview.service -n 50`
-- Verify X server is available
+- Verify X server is available: `xset q`
 - Check config file syntax: `python3 -m json.tool /etc/piview/config.json`
 - Ensure user has permission to start X server
+- Check all services: `sudo systemctl status piview*`
 
 ### Screen goes blank (Should NOT happen with bulletproof mode)
 
@@ -258,9 +323,28 @@ If screen still blanks (very rare), check:
 
 ### Time is incorrect
 
-- Check NTP service: `sudo systemctl status ntp`
+- Check NTP service: `sudo systemctl status systemd-timesyncd` or `sudo systemctl status ntp`
 - Manually sync: `sudo ntpdate -s pool.ntp.org`
 - Check timezone: `timedatectl`
+
+### Chromium shows "didn't shut down correctly" nag bar
+
+This should be automatically fixed by Piview. If you still see it:
+- Check that Piview is running: `sudo systemctl status piview.service`
+- Restart the service: `sudo systemctl restart piview.service`
+- The fix is applied automatically before each browser launch
+
+### Export Logs
+
+To export all logs for troubleshooting:
+
+```bash
+/opt/piview/export_logs.sh
+# or
+piview-export-logs
+```
+
+This creates a tarball with all relevant logs and system information.
 
 ## File Locations
 
@@ -269,42 +353,11 @@ If screen still blanks (very rare), check:
 - Systemd service: `/etc/systemd/system/piview.service`
 - Screen keepalive service: `/etc/systemd/system/piview-keepalive.service`
 - Screen blanking prevention: `/etc/systemd/system/disable-screen-blanking.service`
-- X init config: `~/.xinitrc`
+- X init config: `~/.xinitrc` (Pi OS Lite) or `~/.config/autostart/piview.desktop` (Desktop)
 - Close browser script: `/opt/piview/close_browser.sh`
 - Screen keepalive script: `/opt/piview/screen_keepalive.sh`
-- Read-only toggle: `/usr/local/bin/overlayroot.sh`
+- Export logs script: `/opt/piview/export_logs.sh` (also at `/usr/local/bin/piview-export-logs`)
 - Log file: `/var/log/piview.log`
-
-## Uninstall
-
-To remove Piview:
-
-```bash
-# Stop and disable service
-sudo systemctl stop piview.service
-sudo systemctl disable piview.service
-
-# Remove service file
-sudo rm /etc/systemd/system/piview.service
-sudo systemctl daemon-reload
-
-# Remove application files
-sudo rm -rf /opt/piview
-
-# Remove config (optional)
-sudo rm -rf /etc/piview
-
-# Remove read-only script (optional)
-sudo rm /usr/local/bin/overlayroot.sh
-```
-
-## License
-
-Open source - feel free to use and modify for your needs.
-
-## Contributing
-
-Contributions welcome! This is designed to be simple and reliable for factory environments.
 
 ## Monitoring & Logs
 
@@ -335,6 +388,9 @@ sudo systemctl status piview-keepalive.service
 
 # Screen blanking prevention
 sudo systemctl status disable-screen-blanking.service
+
+# Hardware watchdog (if enabled)
+sudo systemctl status watchdog
 ```
 
 ## Support
@@ -343,6 +399,15 @@ For issues or questions:
 1. Check the log file: `tail -f /var/log/piview.log`
 2. Review service logs: `sudo journalctl -u piview.service -n 100`
 3. Check all services are running: `sudo systemctl status piview*`
-4. Verify all dependencies are installed
-5. Ensure read-only mode is disabled if making changes
-6. Check screen blanking prevention: `xset q`
+4. Export logs: `/opt/piview/export_logs.sh`
+5. Verify all dependencies are installed
+6. Ensure read-only mode is disabled if making changes
+7. Check screen blanking prevention: `xset q`
+
+## License
+
+Open source - feel free to use and modify for your needs.
+
+## Contributing
+
+Contributions welcome! This is designed to be simple and reliable for factory environments.

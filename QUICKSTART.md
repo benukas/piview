@@ -42,8 +42,8 @@ startx
 
 ## Close Browser
 
-- **Keyboard**: Press `ESC` or `q` key
-- **Script**: `./close_browser.sh`
+- **Keyboard**: Press `Alt+F4`
+- **Script**: `/opt/piview/close_browser.sh`
 - **Command**: `pkill -f chromium-browser`
 
 Browser will auto-restart after a few seconds.
