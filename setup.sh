@@ -298,7 +298,11 @@ EOF
 echo "Installing utility scripts..."
 sudo cp close_browser.sh $APP_DIR/ 2>/dev/null || true
 sudo cp screen_keepalive.sh $APP_DIR/ 2>/dev/null || true
+sudo cp export_logs.sh $APP_DIR/ 2>/dev/null || true
 sudo chmod +x $APP_DIR/*.sh 2>/dev/null || true
+
+# Create symlink for easy access to export logs
+sudo ln -sf $APP_DIR/export_logs.sh /usr/local/bin/piview-export-logs 2>/dev/null || true
 
 # Install screen keepalive as backup service
 echo "Installing screen keepalive backup service..."

@@ -1,5 +1,24 @@
 # Piview Troubleshooting Guide
 
+## Export All Logs
+
+**Quick way to export all logs for sharing/debugging:**
+
+```bash
+# Run the export script (creates a timestamped log file)
+piview-export-logs
+
+# Or manually
+/opt/piview/export_logs.sh
+```
+
+This creates a file like `piview_logs_20240101_120000.txt` with all logs, config, and system info.
+
+**To copy from VirtualBox:**
+1. Enable shared folders in VirtualBox settings
+2. Or use SCP: `scp user@ip:piview_logs_*.txt .`
+3. Or enable VirtualBox Guest Additions clipboard and copy/paste
+
 ## Quick Diagnostics
 
 If Piview didn't start after reboot, run these commands in order:
@@ -121,9 +140,9 @@ echo $DISPLAY
 sudo journalctl -u piview.service | grep -i x
 ```
 
-### Desktop Environment (Not Starting)
+### Desktop Environment / VirtualBox (Not Starting)
 
-**Symptoms:** On Desktop, nothing appears after login
+**Symptoms:** On Desktop/VirtualBox, nothing appears after login
 
 **Check:**
 ```bash
@@ -132,16 +151,33 @@ ls -la ~/.config/autostart/piview.desktop
 
 # Check if service is running
 sudo systemctl status piview.service
+
+# Check if X server is running (should be for Desktop)
+echo $DISPLAY
+ps aux | grep X
 ```
 
 **Fix:**
 ```bash
-# Manually start Piview
-python3 /opt/piview/piview.py
+# For Desktop/VirtualBox, service should run Python directly
+# Check service configuration
+sudo systemctl cat piview.service | grep ExecStart
+
+# Manually start Piview (for testing)
+DISPLAY=:0 python3 /opt/piview/piview.py
 
 # Or restart service
 sudo systemctl restart piview.service
+
+# Check logs immediately
+sudo journalctl -u piview.service -f
 ```
+
+**VirtualBox Specific:**
+- Make sure VirtualBox Guest Additions are installed
+- Check that display is set correctly: `echo $DISPLAY` (should be `:0`)
+- If using Desktop, autostart should work automatically
+- Service should start on boot if enabled
 
 ## Manual Start (For Testing)
 
