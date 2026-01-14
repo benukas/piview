@@ -154,44 +154,20 @@ class Piview:
         sys.exit(0)
     
     def prevent_screen_blanking(self):
-        """Aggressively prevent screen blanking - multiple methods"""
+        """Prevent screen blanking - user-space layer (kernel handled by systemd service)"""
         try:
-            # Method 1: xset commands (if X is available)
+            # User-space layer: xset commands (if X is available)
+            # Kernel layer is handled by disable-screen-blanking.service (consoleblank=0)
             if os.environ.get('DISPLAY'):
                 subprocess.run(
-                    ["xset", "s", "off"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=2
-                )
-                subprocess.run(
-                    ["xset", "-dpms"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=2
-                )
-                subprocess.run(
-                    ["xset", "s", "noblank"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=2
-                )
-                # Disable screen saver timeout
-                subprocess.run(
-                    ["xset", "s", "0", "0"],
+                    ["xset", "s", "off", "-dpms", "s", "noblank"],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     timeout=2
                 )
             
-            # Method 2: Set console blank timeout to 0
-            try:
-                with open('/sys/module/kernel/parameters/consoleblank', 'w') as f:
-                    f.write('0')
-            except Exception:
-                pass
-            
-            # Method 3: Disable HDMI power saving
+            # Note: tvservice is deprecated but kept for compatibility
+            # It will fail gracefully on newer firmware
             try:
                 subprocess.run(
                     ["tvservice", "-p"],
@@ -200,19 +176,10 @@ class Piview:
                     timeout=2
                 )
             except Exception:
-                pass
+                pass  # Expected on newer firmware
             
-            # Method 4: Set console blank timeout via setterm
-            subprocess.run(
-                ["setterm", "-blank", "0", "-powerdown", "0", "-powersave", "off"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=2
-            )
-            
-            self.log("Screen blanking prevention activated")
         except Exception as e:
-            self.log(f"Warning: Could not set all screen blanking prevention: {e}", 'warning')
+            self.log(f"Warning: Could not set screen blanking prevention: {e}", 'warning')
     
     def keep_screen_alive(self):
         """Periodically send keepalive signals to prevent screen blanking"""
@@ -596,25 +563,43 @@ class Piview:
         else:
             self.log(f"URL connectivity verified: {url}")
         
-        # Build browser command with SSL flags if needed
+        # Build browser command with clean flag list
         kiosk_flags = self.config["kiosk_flags"].copy()
         
-        # Only add SSL bypass flags if ignore_ssl_errors is true
-        # If certificates are installed, we don't need these flags
-        if self.config.get("ignore_ssl_errors", True):
-            # Add SSL bypass flags only if needed
+        # If certificates are installed, use clean secure flags
+        # Otherwise, add SSL bypass flags if configured
+        if self.config.get("cert_installed", False):
+            # Certificates installed - use clean, secure flag list
+            # Remove any SSL bypass flags that might be in the base config
+            kiosk_flags = [f for f in kiosk_flags if not any(
+                f.startswith(bypass) for bypass in [
+                    "--ignore-certificate-errors",
+                    "--ignore-ssl-errors",
+                    "--allow-running-insecure-content",
+                    "--unsafely-treat-insecure-origin-as-secure",
+                    "--disable-web-security"
+                ]
+            )]
+            self.log("Using clean flag list (certificates installed)")
+        elif self.config.get("ignore_ssl_errors", True):
+            # No certs installed, but ignore SSL errors requested - add bypass flags
             ssl_flags = [
                 "--ignore-certificate-errors",
                 "--ignore-ssl-errors",
                 "--ignore-certificate-errors-spki-list",
                 "--allow-running-insecure-content",
-                "--unsafely-treat-insecure-origin-as-secure"
+                "--unsafely-treat-insecure-origin-as-secure",
+                "--disable-web-security"
             ]
             # Add flags that aren't already in the list
             for flag in ssl_flags:
                 flag_name = flag.split("=")[0] if "=" in flag else flag
                 if not any(f.startswith(flag_name) for f in kiosk_flags):
                     kiosk_flags.append(flag)
+            self.log("Using SSL bypass flags (no certificates installed)")
+        else:
+            # Standard SSL validation
+            self.log("Using standard SSL validation")
         
         # Fix "Exited Cleanly" nag bar - force Chromium to think it exited cleanly
         self.fix_chromium_exit_status()

@@ -177,7 +177,11 @@ WPAEOF
             echo "WiFi connected successfully!"
         else
             echo "Warning: WiFi may not be connected. Check configuration manually."
-            echo "You can check status with: sudo iwconfig wlan0"
+            if [ -n "$WIFI_INTERFACE" ]; then
+                echo "You can check status with: sudo iwconfig $WIFI_INTERFACE"
+            else
+                echo "You can check WiFi status with: sudo iwconfig"
+            fi
         fi
     fi
 else
@@ -186,9 +190,18 @@ fi
 
 # Update system
 echo ""
-echo "Updating system packages..."
+echo "Updating package lists..."
 sudo apt-get update
-sudo apt-get upgrade -y
+
+# Ask about upgrading packages (optional - some orgs prefer install-only)
+echo "" >&2
+ask_tty_yn "Upgrade all installed packages? (recommended, but some orgs prefer install-only)" UPGRADE_REPLY "y"
+if [[ $UPGRADE_REPLY =~ ^[Yy]$ ]] || [ -z "$UPGRADE_REPLY" ]; then
+    echo "Upgrading system packages..."
+    sudo apt-get upgrade -y
+else
+    echo "Skipping package upgrades (install-only mode)"
+fi
 
 # Install dependencies
 echo "Installing dependencies..."
@@ -598,9 +611,12 @@ fi
 
 # Install additional tools for screen management
 echo "Installing additional screen management tools..."
+# Note: tvservice is deprecated on newer firmware but kept for compatibility
 sudo apt-get install -y \
-    tvservice \
-    rpi-update || true
+    unclutter \
+    xdotool || true
+# tvservice may not be available on newer Pi OS - install if available
+sudo apt-get install -y tvservice 2>/dev/null || echo "Note: tvservice not available (deprecated on newer firmware)" || true
 
 # Configure .xinitrc with aggressive screen blanking prevention
 if [ "$NEED_X_SERVER" = true ]; then
@@ -664,17 +680,17 @@ X-GNOME-Autostart-enabled=true
 DESKTOPEOF
 fi
 
-# Disable screen blanking at system level
-echo "Disabling screen blanking at system level..."
+# Disable screen blanking at system level (kernel layer)
+# Note: Python keepalive thread handles user-space layer
+echo "Disabling screen blanking at system level (kernel)..."
 sudo tee /etc/systemd/system/disable-screen-blanking.service > /dev/null << 'BLANKEOF'
 [Unit]
-Description=Disable Screen Blanking
+Description=Disable Screen Blanking (Kernel Layer)
 After=multi-user.target
 
 [Service]
 Type=oneshot
 ExecStart=/bin/bash -c 'echo 0 > /sys/module/kernel/parameters/consoleblank || true'
-ExecStart=/bin/bash -c 'setterm -blank 0 -powerdown 0 -powersave off || true'
 RemainAfterExit=yes
 
 [Install]
