@@ -171,26 +171,51 @@ else
     NEED_X_SERVER=true
 fi
 
+# Check if browser is already installed
+BROWSER_INSTALLED=false
+if command -v chromium-browser >/dev/null 2>&1 || command -v chromium >/dev/null 2>&1; then
+    BROWSER_INSTALLED=true
+    echo "Chromium browser already installed"
+fi
+
+# Determine which browser package to install (if needed)
+if [ "$BROWSER_INSTALLED" = false ]; then
+    # Check which package is available
+    if apt-cache search chromium-browser 2>/dev/null | grep -q "^chromium-browser "; then
+        BROWSER_PKG="chromium-browser"
+    elif apt-cache search chromium 2>/dev/null | grep -q "^chromium "; then
+        BROWSER_PKG="chromium"
+    else
+        # Try both
+        BROWSER_PKG="chromium-browser"
+    fi
+else
+    BROWSER_PKG=""
+fi
+
 if [ "$NEED_X_SERVER" = true ]; then
-    sudo apt-get install -y \
-        chromium-browser \
-        xserver-xorg \
-        xinit \
-        x11-xserver-utils \
-        xdotool \
-        unclutter \
-        python3 \
-        python3-pip \
-        watchdog || true
+    PACKAGES="xserver-xorg xinit x11-xserver-utils xdotool unclutter python3 python3-pip watchdog"
+    if [ -n "$BROWSER_PKG" ]; then
+        PACKAGES="$BROWSER_PKG $PACKAGES"
+    fi
+    sudo apt-get install -y $PACKAGES || true
 else
     # Desktop already has X server, just install browser and tools
-    sudo apt-get install -y \
-        chromium-browser \
-        xdotool \
-        unclutter \
-        python3 \
-        python3-pip \
-        watchdog || true
+    PACKAGES="xdotool unclutter python3 python3-pip watchdog"
+    if [ -n "$BROWSER_PKG" ]; then
+        PACKAGES="$BROWSER_PKG $PACKAGES"
+    fi
+    sudo apt-get install -y $PACKAGES || true
+fi
+
+# Final verification - browser should be available
+if ! command -v chromium-browser >/dev/null 2>&1 && ! command -v chromium >/dev/null 2>&1; then
+    echo "Warning: Chromium browser executable not found in PATH"
+    echo "Trying alternative installation methods..."
+    sudo apt-get update || true
+    sudo apt-get install -y chromium-browser 2>/dev/null || \
+    sudo apt-get install -y chromium 2>/dev/null || \
+    echo "Note: Please ensure Chromium is installed manually if needed"
 fi
 
 # Sync time immediately

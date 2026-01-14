@@ -28,7 +28,9 @@ sudo rm -f /etc/systemd/system/disable-screen-blanking.service
 
 # Remove application files (but keep config)
 echo "Removing application files..."
-sudo rm -rf /opt/piview
+if [ -d /opt/piview ]; then
+    sudo rm -rf /opt/piview
+fi
 
 # Reload systemd
 sudo systemctl daemon-reload
