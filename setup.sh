@@ -9,9 +9,24 @@ echo "Piview - Pi OS Lite Setup"
 echo "=========================================="
 echo ""
 
-# Check if running on Raspberry Pi
-if [ ! -f /proc/device-tree/model ] || ! grep -q "Raspberry Pi" /proc/device-tree/model 2>/dev/null; then
-    echo "Warning: This doesn't appear to be a Raspberry Pi"
+# Check if running on Raspberry Pi or VirtualBox
+IS_RASPBERRY_PI=false
+IS_VIRTUALBOX=false
+
+if [ -f /proc/device-tree/model ] && grep -q "Raspberry Pi" /proc/device-tree/model 2>/dev/null; then
+    IS_RASPBERRY_PI=true
+    echo "Detected: Raspberry Pi hardware"
+elif [ -f /sys/class/dmi/id/product_name ] && grep -qi "virtualbox" /sys/class/dmi/id/product_name 2>/dev/null; then
+    IS_VIRTUALBOX=true
+    echo "Detected: VirtualBox virtual machine"
+    echo "Note: This setup is designed for Raspberry Pi, but will work in VirtualBox for testing."
+elif [ -f /sys/class/dmi/id/sys_vendor ] && grep -qi "virtualbox" /sys/class/dmi/id/sys_vendor 2>/dev/null; then
+    IS_VIRTUALBOX=true
+    echo "Detected: VirtualBox virtual machine"
+    echo "Note: This setup is designed for Raspberry Pi, but will work in VirtualBox for testing."
+else
+    echo "Warning: This doesn't appear to be a Raspberry Pi or VirtualBox"
+    echo "Some features may not work correctly on this system."
     read -p "Continue anyway? (y/n) " -n 1 -r
     echo
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
@@ -19,15 +34,24 @@ if [ ! -f /proc/device-tree/model ] || ! grep -q "Raspberry Pi" /proc/device-tre
     fi
 fi
 
-# WiFi Configuration
+# WiFi Configuration (skip on VirtualBox)
 echo ""
 echo "=========================================="
 echo "WiFi Configuration"
 echo "=========================================="
 echo ""
-read -p "Configure WiFi? (y/n) " -n 1 -r
-echo
-if [[ $REPLY =~ ^[Yy]$ ]]; then
+if [ "$IS_VIRTUALBOX" = true ]; then
+    echo "Skipping WiFi configuration (VirtualBox uses host network)"
+    read -p "Configure WiFi anyway? (y/n) " -n 1 -r
+    echo
+    CONFIGURE_WIFI=$REPLY
+else
+    read -p "Configure WiFi? (y/n) " -n 1 -r
+    echo
+    CONFIGURE_WIFI=$REPLY
+fi
+
+if [[ $CONFIGURE_WIFI =~ ^[Yy]$ ]]; then
     # Install WiFi tools if not already installed
     echo "Installing WiFi configuration tools..."
     sudo apt-get update
@@ -138,18 +162,40 @@ sudo apt-get upgrade -y
 
 # Install dependencies
 echo "Installing dependencies..."
-sudo apt-get install -y \
-    chromium-browser \
-    xserver-xorg \
-    xinit \
-    x11-xserver-utils \
-    xdotool \
-    unclutter \
-    python3 \
-    python3-pip \
-    ntp \
-    ntpdate \
-    watchdog || true
+# Check if we're on Raspberry Pi Desktop (has GUI) or Lite (needs X server)
+if [ -n "$DISPLAY" ] || [ -d /usr/share/X11 ]; then
+    echo "Detected: Desktop environment (Raspberry Pi Desktop)"
+    NEED_X_SERVER=false
+else
+    echo "Detected: Lite/headless (needs X server)"
+    NEED_X_SERVER=true
+fi
+
+if [ "$NEED_X_SERVER" = true ]; then
+    sudo apt-get install -y \
+        chromium-browser \
+        xserver-xorg \
+        xinit \
+        x11-xserver-utils \
+        xdotool \
+        unclutter \
+        python3 \
+        python3-pip \
+        ntp \
+        ntpdate \
+        watchdog || true
+else
+    # Desktop already has X server, just install browser and tools
+    sudo apt-get install -y \
+        chromium-browser \
+        xdotool \
+        unclutter \
+        python3 \
+        python3-pip \
+        ntp \
+        ntpdate \
+        watchdog || true
+fi
 
 # Sync time immediately
 echo "Syncing time with NTP..."
@@ -247,7 +293,9 @@ sudo systemctl enable piview-keepalive.service 2>/dev/null || true
 
 # Install systemd service with aggressive restart policy
 echo "Installing systemd service with bulletproof restart policy..."
-sudo tee /etc/systemd/system/piview.service > /dev/null << EOF
+if [ "$NEED_X_SERVER" = true ]; then
+    # Lite version - needs startx
+    sudo tee /etc/systemd/system/piview.service > /dev/null << EOF
 [Unit]
 Description=Piview Kiosk Mode - Factory Hardened
 After=network.target graphical.target
@@ -287,6 +335,49 @@ SyslogIdentifier=piview
 [Install]
 WantedBy=graphical.target
 EOF
+else
+    # Desktop version - X server already running
+    sudo tee /etc/systemd/system/piview.service > /dev/null << EOF
+[Unit]
+Description=Piview Kiosk Mode - Factory Hardened
+After=network.target graphical.target
+Wants=graphical.target network-online.target
+Requires=network-online.target
+
+[Service]
+Type=simple
+User=$USER
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/home/$USER/.Xauthority
+
+# Pre-start: Ensure screen blanking is disabled
+ExecStartPre=/bin/bash -c 'xset s off -dpms s noblank 2>/dev/null || true'
+ExecStartPre=/bin/bash -c 'setterm -blank 0 -powerdown 0 2>/dev/null || true'
+ExecStartPre=/bin/sleep 3
+
+# Main start - run directly (X server already running)
+ExecStart=/usr/bin/python3 /opt/piview/piview.py
+
+# Aggressive restart policy
+Restart=always
+RestartSec=5
+StartLimitInterval=0
+StartLimitBurst=0
+
+# Kill settings
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=piview
+
+[Install]
+WantedBy=graphical.target
+EOF
+fi
 
 # Configure read-only mode script
 echo "Creating read-only mode toggle script..."
@@ -438,14 +529,22 @@ BLANKEOF
 
 sudo systemctl enable disable-screen-blanking.service
 
-# Disable sleep/suspend/hibernate
-echo "Disabling system sleep/suspend..."
-sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target 2>/dev/null || true
+# Disable sleep/suspend/hibernate (skip on VirtualBox)
+if [ "$IS_VIRTUALBOX" != true ]; then
+    echo "Disabling system sleep/suspend..."
+    sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target 2>/dev/null || true
+else
+    echo "Skipping sleep/suspend disable (VirtualBox handles this)"
+fi
 
-# Configure kernel parameters to prevent blanking
-echo "Configuring kernel parameters..."
-if ! grep -q "consoleblank=0" /boot/cmdline.txt 2>/dev/null; then
-    sudo sed -i 's/$/ consoleblank=0/' /boot/cmdline.txt
+# Configure kernel parameters to prevent blanking (skip on VirtualBox)
+if [ "$IS_VIRTUALBOX" != true ] && [ -f /boot/cmdline.txt ]; then
+    echo "Configuring kernel parameters..."
+    if ! grep -q "consoleblank=0" /boot/cmdline.txt 2>/dev/null; then
+        sudo sed -i 's/$/ consoleblank=0/' /boot/cmdline.txt
+    fi
+else
+    echo "Skipping kernel parameter configuration (VirtualBox or no /boot/cmdline.txt)"
 fi
 
 # Create log directory
