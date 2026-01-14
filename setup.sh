@@ -508,7 +508,21 @@ unclutter -idle 1 -root &
 # Start Piview
 exec /usr/bin/python3 /opt/piview/piview.py
 XINITEOF
-chmod +x ~/.xinitrc
+    chmod +x ~/.xinitrc
+else
+    echo "Desktop environment detected - X server already running"
+    echo "Creating autostart entry instead..."
+    mkdir -p ~/.config/autostart
+    cat > ~/.config/autostart/piview.desktop << 'DESKTOPEOF'
+[Desktop Entry]
+Type=Application
+Name=Piview
+Exec=/usr/bin/python3 /opt/piview/piview.py
+Hidden=false
+NoDisplay=false
+X-GNOME-Autostart-enabled=true
+DESKTOPEOF
+fi
 
 # Disable screen blanking at system level
 echo "Disabling screen blanking at system level..."
