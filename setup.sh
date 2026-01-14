@@ -56,18 +56,24 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
             
             # Generate PSK if wpa_passphrase is available
             if command -v wpa_passphrase &> /dev/null; then
-                WIFI_PSK=$(wpa_passphrase "$WIFI_SSID" "$WIFI_PASSWORD" | grep -v "^#" | grep "psk=" | cut -d= -f2)
+                # wpa_passphrase outputs psk=... on a line, extract it
+                WIFI_PSK=$(wpa_passphrase "$WIFI_SSID" "$WIFI_PASSWORD" 2>/dev/null | grep "psk=" | grep -v "#" | cut -d= -f2 | tr -d ' ')
             else
-                # Fallback: use password directly (less secure but works)
+                # Fallback: use password in quotes (wpa_supplicant will hash it)
                 WIFI_PSK="\"$WIFI_PASSWORD\""
             fi
+            
+            # Ask for country code (required for WiFi on Pi)
+            echo ""
+            read -p "Enter country code (e.g., US, GB, DE) [default: US]: " COUNTRY_CODE
+            COUNTRY_CODE=${COUNTRY_CODE:-US}
             
             # Configure wpa_supplicant.conf
             echo "Configuring WiFi (WPA2)..."
             sudo tee /etc/wpa_supplicant/wpa_supplicant.conf > /dev/null << WPAEOF
 ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
 update_config=1
-country=US
+country=$COUNTRY_CODE
 
 network={
     ssid="$WIFI_SSID"
@@ -77,11 +83,15 @@ network={
 WPAEOF
         else
             # Open network (no password)
+            echo ""
+            read -p "Enter country code (e.g., US, GB, DE) [default: US]: " COUNTRY_CODE
+            COUNTRY_CODE=${COUNTRY_CODE:-US}
+            
             echo "Configuring WiFi (open network)..."
             sudo tee /etc/wpa_supplicant/wpa_supplicant.conf > /dev/null << WPAEOF
 ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
 update_config=1
-country=US
+country=$COUNTRY_CODE
 
 network={
     ssid="$WIFI_SSID"
