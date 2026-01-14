@@ -162,11 +162,32 @@ WPAEOF
         sudo systemctl enable wpa_supplicant 2>/dev/null || true
         sudo systemctl start wpa_supplicant 2>/dev/null || true
         
-        # Restart networking
-        echo "Restarting network interface..."
-        sudo ifdown wlan0 2>/dev/null || true
-        sleep 2
-        sudo ifup wlan0 2>/dev/null || true
+        # Find WiFi interface (handle both wlan0 and predictable names)
+        WIFI_INTERFACE=""
+        if [ -d /sys/class/net ]; then
+            # Try wlan0 first (legacy)
+            if [ -d /sys/class/net/wlan0 ]; then
+                WIFI_INTERFACE="wlan0"
+            else
+                # Try predictable names (wlan*, wlp*, etc.)
+                for iface in /sys/class/net/wlan* /sys/class/net/wlp*; do
+                    if [ -d "$iface" ]; then
+                        WIFI_INTERFACE=$(basename "$iface")
+                        break
+                    fi
+                done
+            fi
+        fi
+        
+        # Restart network interface if found
+        if [ -n "$WIFI_INTERFACE" ]; then
+            echo "Restarting network interface: $WIFI_INTERFACE"
+            sudo ifdown "$WIFI_INTERFACE" 2>/dev/null || true
+            sleep 2
+            sudo ifup "$WIFI_INTERFACE" 2>/dev/null || true
+        else
+            echo "Warning: Could not detect WiFi interface. You may need to restart networking manually."
+        fi
         
         # Wait for connection
         echo "Waiting for WiFi connection..."
