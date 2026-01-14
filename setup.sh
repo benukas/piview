@@ -773,7 +773,7 @@ echo ""
 echo "To start the service now:"
 echo "  sudo systemctl start piview.service"
 echo ""
-echo "To close browser: Press ESC or 'q' key"
+echo "To close browser: Press Alt+F4 or use /opt/piview/close_browser.sh"
 echo "To stop Piview: Press Ctrl+C or stop service"
 echo ""
 
