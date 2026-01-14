@@ -27,9 +27,12 @@ cd "$INSTALL_DIR"
 echo "Downloading Piview from GitHub..."
 echo "This may take a moment depending on your connection..."
 echo ""
+echo "Note: If GitHub is blocked, see OFFLINE-INSTALL.md for offline installation options"
+echo ""
 
 # Download with progress indicator (remove -s to show progress)
-if curl -L --progress-bar https://github.com/benukas/piview/archive/refs/heads/main.tar.gz -o piview.tar.gz; then
+# Try GitHub first, fallback to alternative if needed
+if curl -L --progress-bar --connect-timeout 10 https://github.com/benukas/piview/archive/refs/heads/main.tar.gz -o piview.tar.gz 2>/dev/null; then
     echo ""
     echo "Extracting files..."
     tar -xzf piview.tar.gz --strip-components=1
@@ -50,7 +53,21 @@ if curl -L --progress-bar https://github.com/benukas/piview/archive/refs/heads/m
     ./setup.sh
 else
     echo -e "${RED}Error: Failed to download Piview from GitHub${NC}"
-    echo "Please check your internet connection and try again."
+    echo ""
+    echo "GitHub may be blocked. Try one of these options:"
+    echo ""
+    echo "1. Offline Installation:"
+    echo "   - Download files manually from GitHub (on another network)"
+    echo "   - Transfer to Pi via USB/SCP"
+    echo "   - Run: bash install-offline.sh"
+    echo ""
+    echo "2. See OFFLINE-INSTALL.md for detailed offline installation instructions"
+    echo ""
+    echo "3. Required files for offline install:"
+    echo "   - setup.sh"
+    echo "   - piview.py"
+    echo "   - install-offline.sh"
+    echo ""
     exit 1
 fi
 
