@@ -989,5 +989,26 @@ else
 fi
 
 echo ""
+echo "=========================================="
+echo "Final Step: Read-Only Filesystem (Optional)"
+echo "=========================================="
+echo ""
+echo "Read-only mode protects your SD card from wear, but must be enabled LAST"
+echo "after all installation steps are complete."
+echo "" >&2
+ask_tty_yn "Enable read-only mode for SD card now? (recommended for factory use, but enable only after install completes)" READONLY_REPLY "n"
+if [[ $READONLY_REPLY =~ ^[Yy]$ ]]; then
+    echo "Enabling read-only mode..."
+    sudo /usr/local/bin/overlayroot.sh enable
+    echo "Read-only mode enabled. Reboot to apply fully."
+else
+    echo "Read-only mode skipped. You can enable it later with: sudo overlayroot.sh enable"
+fi
+
+echo ""
+echo "=========================================="
+echo "Setup Complete!"
+echo "=========================================="
+echo ""
 echo "Setup complete! Reboot to start in kiosk mode."
 echo ""
