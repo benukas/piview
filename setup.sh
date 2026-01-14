@@ -567,6 +567,17 @@ else
 fi
 echo "" >&2
 
+# Build failover config JSON if configured (must be before config file creation)
+if [ -n "$FAILOVER_WIFI_SSID" ]; then
+    FAILOVER_JSON=",
+  \"network_failover_enabled\": true,
+  \"failover_wifi_ssid\": \"$FAILOVER_WIFI_SSID\",
+  \"failover_wifi_interface\": \"${FAILOVER_WIFI_INTERFACE:-wlan0}\""
+else
+    FAILOVER_JSON=",
+  \"network_failover_enabled\": false"
+fi
+
 # Create config file
 echo "Creating configuration..."
 sudo tee $CONFIG_DIR/config.json > /dev/null << EOF
