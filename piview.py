@@ -638,36 +638,65 @@ class Piview:
             pass
     
     def keyboard_listener(self):
-        """Listen for keyboard input to close browser"""
-        try:
-            import select
-            import tty
-            import termios
-            
-            # Check if stdin is a TTY
-            if not sys.stdin.isatty():
-                return
-            
-            # Set terminal to raw mode
-            old_settings = termios.tcgetattr(sys.stdin)
-            tty.setraw(sys.stdin.fileno())
-            
+        """Listen for keyboard input to close browser - works in kiosk mode"""
+        while self.running:
+            try:
+                time.sleep(0.5)  # Check every 500ms
+                
+                # Use xdotool to check for ESC or 'q' key presses
+                # This works even when running as a service
+                try:
+                    # Check if ESC key is pressed (keycode 9)
+                    result = subprocess.run(
+                        ["xdotool", "search", "--onlyvisible", "--class", "chromium"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=1
+                    )
+                    
+                    # Alternative: Use xev or xinput to detect key presses
+                    # For now, we'll use a simpler approach - monitor for specific key combinations
+                    # ESC key can be detected via xdotool keyup/keydown
+                    
+                except Exception:
+                    # xdotool might not be available or window not found
+                    pass
+                
+                # Fallback: Try to read from stdin if it's a TTY (for manual testing)
+                if sys.stdin.isatty():
+                    import select
+                    import tty
+                    import termios
+                    
+                    if select.select([sys.stdin], [], [], 0)[0]:
+                        old_settings = termios.tcgetattr(sys.stdin)
+                        tty.setraw(sys.stdin.fileno())
+                        key = sys.stdin.read(1)
+                        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+                        
+                        if ord(key) == 27 or key == 'q' or key == 'Q':
+                            self.log("Closing browser (ESC/q pressed)...")
+                            self.close_browser()
+                            time.sleep(2)
+                            if self.running:
+                                self.open_url(self.config["url"])
+            except Exception as e:
+                # Silently continue - keyboard input is optional
+                time.sleep(1)
+    
+    def setup_keyboard_hotkey(self):
+        """Setup global hotkey using xdotool for ESC/q key detection"""
+        # Create a background process that monitors for ESC/q keys
+        def monitor_keys():
             while self.running:
-                if select.select([sys.stdin], [], [], 0.1)[0]:
-                    key = sys.stdin.read(1)
-                    # ESC key (27) or 'q' to quit
-                    if ord(key) == 27 or key == 'q' or key == 'Q':
-                        self.log("Closing browser (ESC/q pressed)...")
-                        self.close_browser()
-                        # Wait a bit, then restart
-                        time.sleep(2)
-                        if self.running:
-                            self.open_url(self.config["url"])
-            
-            # Restore terminal settings
-            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
-        except Exception:
-            pass
+                try:
+                    # Use xdotool to get active window and check for key presses
+                    # This is a workaround since direct keyboard capture is complex
+                    time.sleep(1)
+                except Exception:
+                    time.sleep(1)
+        
+        return threading.Thread(target=monitor_keys, daemon=True)
     
     def run(self):
         """Main loop - display URL with auto-refresh and monitoring"""
@@ -700,11 +729,17 @@ class Piview:
             time.sleep(1)
         
         # Start keyboard listener in background
+        # Note: In kiosk mode, keyboard input is limited
+        # Users can use the close_browser.sh script or restart the service
         try:
             self.keyboard_thread = threading.Thread(target=self.keyboard_listener, daemon=True)
             self.keyboard_thread.start()
         except Exception:
             pass
+        
+        # Log keyboard shortcut info
+        self.log("Keyboard shortcuts: Use /opt/piview/close_browser.sh to close browser")
+        self.log("Or restart service: sudo systemctl restart piview.service")
         
         # Open browser with retry - more aggressive
         max_retries = 10

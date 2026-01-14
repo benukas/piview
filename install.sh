@@ -33,9 +33,20 @@ cd piview-main
 # Make scripts executable
 chmod +x setup.sh
 
-# Run setup
+# Run setup (this will prompt for URL, refresh interval, WiFi, etc.)
 echo ""
-echo -e "${GREEN}Starting Piview setup...${NC}"
+echo -e "${GREEN}=========================================="
+echo "Starting Piview Setup"
+echo "==========================================${NC}"
+echo ""
+echo "You will be prompted to configure:"
+echo "  - WiFi (optional)"
+echo "  - URL to display"
+echo "  - Refresh interval"
+echo "  - SSL certificate handling"
+echo "  - Read-only mode (optional)"
+echo ""
+read -p "Press Enter to continue with setup..."
 echo ""
 ./setup.sh
 
