@@ -55,6 +55,7 @@ chmod +x setup.sh
 ```
 
 The setup script will:
+- **Configure WiFi** (SSID and password) - Essential for Pi OS Lite command-line setup
 - Install all dependencies (Chromium, X server, Python, etc.)
 - Configure NTP time synchronization
 - Set up kiosk mode with **bulletproof screen blanking prevention**
@@ -67,8 +68,10 @@ The setup script will:
 - Optionally enable read-only SD card mode
 
 During setup, you'll be prompted for:
+- **WiFi SSID and password** (optional - for Pi OS Lite)
 - The URL to display
 - Refresh interval (seconds)
+- SSL certificate error handling
 - Whether to enable read-only mode
 
 ### 3. Configure URL

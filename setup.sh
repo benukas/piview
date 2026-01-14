@@ -19,7 +19,109 @@ if [ ! -f /proc/device-tree/model ] || ! grep -q "Raspberry Pi" /proc/device-tre
     fi
 fi
 
+# WiFi Configuration
+echo ""
+echo "=========================================="
+echo "WiFi Configuration"
+echo "=========================================="
+echo ""
+read -p "Configure WiFi? (y/n) " -n 1 -r
+echo
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    # Install WiFi tools if not already installed
+    echo "Installing WiFi configuration tools..."
+    sudo apt-get update
+    sudo apt-get install -y wpasupplicant wireless-tools || true
+    
+    # Get WiFi SSID
+    echo ""
+    read -p "Enter WiFi SSID (network name): " WIFI_SSID
+    if [ -z "$WIFI_SSID" ]; then
+        echo "No SSID provided, skipping WiFi configuration."
+    else
+        # Ask if password protected
+        echo ""
+        read -p "Is this network password protected? (WPA2) (y/n) " -n 1 -r
+        echo
+        
+        # Backup existing wpa_supplicant.conf
+        if [ -f /etc/wpa_supplicant/wpa_supplicant.conf ]; then
+            sudo cp /etc/wpa_supplicant/wpa_supplicant.conf /etc/wpa_supplicant/wpa_supplicant.conf.backup
+        fi
+        
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            # WPA2 network - get password
+            read -sp "Enter WiFi password: " WIFI_PASSWORD
+            echo ""
+            
+            # Generate PSK if wpa_passphrase is available
+            if command -v wpa_passphrase &> /dev/null; then
+                WIFI_PSK=$(wpa_passphrase "$WIFI_SSID" "$WIFI_PASSWORD" | grep -v "^#" | grep "psk=" | cut -d= -f2)
+            else
+                # Fallback: use password directly (less secure but works)
+                WIFI_PSK="\"$WIFI_PASSWORD\""
+            fi
+            
+            # Configure wpa_supplicant.conf
+            echo "Configuring WiFi (WPA2)..."
+            sudo tee /etc/wpa_supplicant/wpa_supplicant.conf > /dev/null << WPAEOF
+ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
+update_config=1
+country=US
+
+network={
+    ssid="$WIFI_SSID"
+    psk=$WIFI_PSK
+    key_mgmt=WPA-PSK
+}
+WPAEOF
+        else
+            # Open network (no password)
+            echo "Configuring WiFi (open network)..."
+            sudo tee /etc/wpa_supplicant/wpa_supplicant.conf > /dev/null << WPAEOF
+ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
+update_config=1
+country=US
+
+network={
+    ssid="$WIFI_SSID"
+    key_mgmt=NONE
+}
+WPAEOF
+        fi
+        
+        # Set proper permissions
+        sudo chmod 600 /etc/wpa_supplicant/wpa_supplicant.conf
+        
+        # Enable and start wpa_supplicant
+        echo "Enabling WiFi..."
+        sudo systemctl enable wpa_supplicant 2>/dev/null || true
+        sudo systemctl start wpa_supplicant 2>/dev/null || true
+        
+        # Restart networking
+        echo "Restarting network interface..."
+        sudo ifdown wlan0 2>/dev/null || true
+        sleep 2
+        sudo ifup wlan0 2>/dev/null || true
+        
+        # Wait for connection
+        echo "Waiting for WiFi connection..."
+        sleep 5
+        
+        # Check connection
+        if ping -c 1 -W 5 8.8.8.8 &>/dev/null; then
+            echo "WiFi connected successfully!"
+        else
+            echo "Warning: WiFi may not be connected. Check configuration manually."
+            echo "You can check status with: sudo iwconfig wlan0"
+        fi
+    fi
+else
+    echo "Skipping WiFi configuration. Using existing network setup."
+fi
+
 # Update system
+echo ""
 echo "Updating system packages..."
 sudo apt-get update
 sudo apt-get upgrade -y
