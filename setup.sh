@@ -86,7 +86,6 @@ fi
 if [[ $CONFIGURE_WIFI =~ ^[Yy]$ ]]; then
     # Install WiFi tools if not already installed
     echo "Installing WiFi configuration tools..."
-    sudo apt-get update
     sudo apt-get install -y wpasupplicant wireless-tools || true
     
     # Get WiFi SSID
@@ -209,16 +208,22 @@ else
     echo "Skipping WiFi configuration. Using existing network setup."
 fi
 
-# Update system
-echo ""
-echo "Updating package lists..."
-echo "This may take a few minutes on first run..."
-sudo apt-get update
+# Ask about updating package lists (optional - can skip if lists are recent)
+echo "" >&2
+ask_tty_yn "Update package lists? (recommended, but can skip if recently updated)" UPDATE_REPLY "y"
+if [[ $UPDATE_REPLY =~ ^[Yy]$ ]] || [ -z "$UPDATE_REPLY" ]; then
+    echo ""
+    echo "Updating package lists..."
+    echo "This may take a few minutes on first run..."
+    sudo apt-get update
+else
+    echo "Skipping package list update"
+fi
 
 # Ask about upgrading packages (optional - some orgs prefer install-only)
 echo "" >&2
-ask_tty_yn "Upgrade all installed packages? (recommended, but some orgs prefer install-only)" UPGRADE_REPLY "y"
-if [[ $UPGRADE_REPLY =~ ^[Yy]$ ]] || [ -z "$UPGRADE_REPLY" ]; then
+ask_tty_yn "Upgrade all installed packages? (recommended, but some orgs prefer install-only)" UPGRADE_REPLY "n"
+if [[ $UPGRADE_REPLY =~ ^[Yy]$ ]]; then
     echo "Upgrading system packages..."
     sudo apt-get upgrade -y
 else
@@ -447,7 +452,6 @@ sudo apt-get install -y ca-certificates libnss3-tools || true
 if ! command -v chromium-browser >/dev/null 2>&1 && ! command -v chromium >/dev/null 2>&1; then
     echo "Warning: Chromium browser executable not found in PATH"
     echo "Trying alternative installation methods..."
-    sudo apt-get update || true
     sudo apt-get install -y chromium-browser 2>/dev/null || \
     sudo apt-get install -y chromium 2>/dev/null || \
     echo "Note: Please ensure Chromium is installed manually if needed"
