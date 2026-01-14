@@ -2,8 +2,7 @@
 # Piview - One-shot setup script for Raspberry Pi OS Lite
 # Sets up kiosk mode with read-only SD card, NTP sync, and auto-start
 
-# Don't exit on error for prompts - use set -e carefully
-set +e  # Allow commands to fail for better error handling
+set -e
 
 echo "=========================================="
 echo "Piview - Pi OS Lite Setup"
@@ -527,9 +526,10 @@ OVEREOF
 sudo chmod +x /usr/local/bin/overlayroot.sh
 
 echo ""
-read -p "Enable read-only mode for SD card now? (recommended for factory use) (y/n) " -n 1 -r
-echo
-if [[ $REPLY =~ ^[Yy]$ ]]; then
+echo -n "Enable read-only mode for SD card now? (recommended for factory use) (y/n) [default: n]: "
+read -n 1 READONLY_REPLY
+echo ""
+if [[ $READONLY_REPLY =~ ^[Yy]$ ]]; then
     sudo /usr/local/bin/overlayroot.sh enable
 fi
 
