@@ -595,18 +595,26 @@ class Piview:
         except Exception:
             pass
         
-        # Open browser with retry
-        max_retries = 5
+        # Open browser with retry - more aggressive
+        max_retries = 10
         for attempt in range(max_retries):
             if self.open_url(url):
                 break
             if attempt < max_retries - 1:
-                self.log(f"Failed to open browser, retrying ({attempt + 1}/{max_retries})...", 'warning')
-                time.sleep(5)
+                wait_time = min(5 + attempt, 15)  # Progressive backoff
+                self.log(f"Failed to open browser, retrying ({attempt + 1}/{max_retries}) in {wait_time}s...", 'warning')
+                time.sleep(wait_time)
                 self.prevent_screen_blanking()
+                # Try to fix X server issues
+                if os.environ.get('DISPLAY'):
+                    try:
+                        subprocess.run(["xset", "q"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+                    except:
+                        self.log("X server may have issues, continuing anyway...", 'warning')
             else:
-                self.log("Failed to open browser after all retries. Exiting.", 'error')
-                return
+                self.log("Failed to open browser after all retries. Will keep trying...", 'error')
+                # Don't exit - keep trying in the main loop
+                time.sleep(30)
         
         # Main loop - refresh periodically and monitor
         last_refresh = time.time()

@@ -645,12 +645,17 @@ if [ -f /usr/local/bin/overlayroot.sh ]; then
     echo ""
 fi
 
-read -p "Enable and start Piview service now? (y/n) " -n 1 -r
-echo
-if [[ $REPLY =~ ^[Yy]$ ]]; then
-    sudo systemctl enable piview.service
-    sudo systemctl start piview.service
-    echo "Piview service enabled and started!"
+# Always enable and start by default (bulletproof)
+echo "Enabling and starting Piview service..."
+sudo systemctl enable piview.service
+sudo systemctl start piview.service
+
+# Verify it started
+sleep 2
+if sudo systemctl is-active --quiet piview.service; then
+    echo "✓ Piview service is running"
+else
+    echo "⚠ Service may need a moment to start. Check with: sudo systemctl status piview.service"
 fi
 
 echo ""
