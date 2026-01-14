@@ -833,8 +833,16 @@ xset s off -dpms s noblank 2>/dev/null || true
 # Hide cursor
 unclutter -idle 1 -root &
 
-# Start Piview (Python handles keepalive)
-exec /usr/bin/python3 /opt/piview/piview.py
+# Keep X server alive - restart Piview if it exits
+# This ensures X server doesn't close when browser closes
+while true; do
+    # Start Piview (Python handles keepalive and browser restart)
+    /usr/bin/python3 /opt/piview/piview.py
+    
+    # If Piview exits (shouldn't happen), wait a moment and restart
+    # This keeps X server alive even if browser closes
+    sleep 2
+done
 XINITEOF
     chmod +x ~/.xinitrc
 else
