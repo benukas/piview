@@ -31,11 +31,23 @@
 
 ## Quick Start
 
-### 1. Download Files
+### One-Line Installation (Recommended)
+
+```bash
+curl -sSL https://raw.githubusercontent.com/benukas/piview/main/install.sh | bash
+```
+
+That's it! The installer will download and set up everything automatically.
+
+### Manual Installation
+
+If you prefer to install manually:
+
+1. Download Files
 
 Transfer `piview.py` and `setup.sh` to your Raspberry Pi.
 
-### 2. Run Setup
+2. Run Setup
 
 ```bash
 chmod +x setup.sh
