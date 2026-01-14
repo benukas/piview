@@ -1,0 +1,380 @@
+#!/bin/bash
+# Piview - One-shot setup script for Raspberry Pi OS Lite
+# Sets up kiosk mode with read-only SD card, NTP sync, and auto-start
+
+set -e
+
+echo "=========================================="
+echo "Piview - Pi OS Lite Setup"
+echo "=========================================="
+echo ""
+
+# Check if running on Raspberry Pi
+if [ ! -f /proc/device-tree/model ] || ! grep -q "Raspberry Pi" /proc/device-tree/model 2>/dev/null; then
+    echo "Warning: This doesn't appear to be a Raspberry Pi"
+    read -p "Continue anyway? (y/n) " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        exit 1
+    fi
+fi
+
+# Update system
+echo "Updating system packages..."
+sudo apt-get update
+sudo apt-get upgrade -y
+
+# Install dependencies
+echo "Installing dependencies..."
+sudo apt-get install -y \
+    chromium-browser \
+    xserver-xorg \
+    xinit \
+    x11-xserver-utils \
+    xdotool \
+    unclutter \
+    python3 \
+    python3-pip \
+    ntp \
+    ntpdate \
+    watchdog || true
+
+# Sync time immediately
+echo "Syncing time with NTP..."
+sudo systemctl stop ntp 2>/dev/null || true
+sudo ntpdate -s time.nist.gov || sudo ntpdate -s pool.ntp.org || true
+sudo systemctl start ntp
+sudo systemctl enable ntp
+
+# Create application directory
+APP_DIR="/opt/piview"
+echo "Creating application directory at $APP_DIR..."
+sudo mkdir -p $APP_DIR
+sudo cp piview.py $APP_DIR/
+sudo chmod +x $APP_DIR/piview.py
+
+# Create config directory
+CONFIG_DIR="/etc/piview"
+sudo mkdir -p $CONFIG_DIR
+
+# Get URL from user or use default
+echo ""
+read -p "Enter the URL to display (or press Enter for default): " USER_URL
+USER_URL=${USER_URL:-"https://example.com"}
+
+read -p "Enter refresh interval in seconds (default: 60): " REFRESH_INTERVAL
+REFRESH_INTERVAL=${REFRESH_INTERVAL:-60}
+
+# Create config file
+echo "Creating configuration..."
+sudo tee $CONFIG_DIR/config.json > /dev/null << EOF
+{
+  "url": "$USER_URL",
+  "refresh_interval": $REFRESH_INTERVAL,
+  "browser": "chromium-browser",
+  "kiosk_flags": [
+    "--kiosk",
+    "--noerrdialogs",
+    "--disable-infobars",
+    "--disable-session-crashed-bubble",
+    "--disable-restore-session-state",
+    "--autoplay-policy=no-user-gesture-required",
+    "--disable-features=TranslateUI",
+    "--disable-ipc-flooding-protection",
+    "--disable-background-networking",
+    "--disable-default-apps",
+    "--disable-sync"
+  ]
+}
+EOF
+
+# Copy utility scripts
+echo "Installing utility scripts..."
+sudo cp close_browser.sh $APP_DIR/ 2>/dev/null || true
+sudo cp screen_keepalive.sh $APP_DIR/ 2>/dev/null || true
+sudo chmod +x $APP_DIR/*.sh 2>/dev/null || true
+
+# Install screen keepalive as backup service
+echo "Installing screen keepalive backup service..."
+sudo tee /etc/systemd/system/piview-keepalive.service > /dev/null << EOF
+[Unit]
+Description=Piview Screen Keepalive Backup
+After=graphical.target
+Requires=graphical.target
+
+[Service]
+Type=simple
+User=$USER
+Environment=DISPLAY=:0
+ExecStart=/opt/piview/screen_keepalive.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=graphical.target
+EOF
+sudo systemctl enable piview-keepalive.service 2>/dev/null || true
+
+# Install systemd service with aggressive restart policy
+echo "Installing systemd service with bulletproof restart policy..."
+sudo tee /etc/systemd/system/piview.service > /dev/null << EOF
+[Unit]
+Description=Piview Kiosk Mode - Factory Hardened
+After=network.target graphical.target
+Wants=graphical.target network-online.target
+Requires=network-online.target
+
+[Service]
+Type=simple
+User=$USER
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/home/$USER/.Xauthority
+
+# Pre-start: Ensure screen blanking is disabled
+ExecStartPre=/bin/bash -c 'xset s off -dpms s noblank 2>/dev/null || true'
+ExecStartPre=/bin/bash -c 'setterm -blank 0 -powerdown 0 2>/dev/null || true'
+ExecStartPre=/bin/sleep 5
+
+# Main start
+ExecStart=/usr/bin/startx
+
+# Aggressive restart policy
+Restart=always
+RestartSec=5
+StartLimitInterval=0
+StartLimitBurst=0
+
+# Kill settings
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=piview
+
+[Install]
+WantedBy=graphical.target
+EOF
+
+# Configure read-only mode script
+echo "Creating read-only mode toggle script..."
+sudo tee /usr/local/bin/overlayroot.sh > /dev/null << 'OVEREOF'
+#!/bin/bash
+# Toggle read-only mode for SD card
+
+if [ "$1" = "enable" ]; then
+    echo "Enabling read-only mode..."
+    
+    # Make root filesystem read-only
+    sudo mount -o remount,ro / 2>/dev/null || true
+    sudo mount -o remount,ro /boot 2>/dev/null || true
+    
+    # Update cmdline.txt for permanent read-only
+    if [ -f /boot/cmdline.txt ]; then
+        sudo cp /boot/cmdline.txt /boot/cmdline.txt.backup
+        if ! grep -q "fastboot noswap" /boot/cmdline.txt; then
+            sudo sed -i 's/$/ fastboot noswap/' /boot/cmdline.txt
+        fi
+    fi
+    
+    # Update fstab
+    sudo cp /etc/fstab /etc/fstab.backup
+    sudo sed -i 's/vfat\s*defaults/vfat defaults,ro/' /etc/fstab 2>/dev/null || true
+    sudo sed -i 's/ext4\s*defaults/ext4 defaults,ro/' /etc/fstab 2>/dev/null || true
+    
+    echo "Read-only mode enabled. Reboot to apply fully."
+    echo "To make changes later, run: sudo overlayroot.sh disable"
+    
+elif [ "$1" = "disable" ]; then
+    echo "Disabling read-only mode..."
+    
+    # Make root filesystem read-write
+    sudo mount -o remount,rw / 2>/dev/null || true
+    sudo mount -o remount,rw /boot 2>/dev/null || true
+    
+    # Restore cmdline.txt
+    if [ -f /boot/cmdline.txt.backup ]; then
+        sudo cp /boot/cmdline.txt.backup /boot/cmdline.txt
+    else
+        sudo sed -i 's/ fastboot noswap//' /boot/cmdline.txt 2>/dev/null || true
+    fi
+    
+    # Restore fstab
+    if [ -f /etc/fstab.backup ]; then
+        sudo cp /etc/fstab.backup /etc/fstab
+    else
+        sudo sed -i 's/vfat defaults,ro/vfat defaults/' /etc/fstab 2>/dev/null || true
+        sudo sed -i 's/ext4 defaults,ro/ext4 defaults/' /etc/fstab 2>/dev/null || true
+    fi
+    
+    echo "Read-only mode disabled. Filesystem is now writable."
+    
+elif [ "$1" = "status" ]; then
+    ROOT=$(findmnt -n -o OPTIONS / 2>/dev/null | grep -o ro || echo "")
+    BOOT=$(findmnt -n -o OPTIONS /boot 2>/dev/null | grep -o ro || echo "")
+    if [ -n "$ROOT" ] || [ -n "$BOOT" ]; then
+        echo "Read-only mode: ENABLED"
+    else
+        echo "Read-only mode: DISABLED"
+    fi
+else
+    echo "Usage: overlayroot.sh {enable|disable|status}"
+    echo ""
+    echo "  enable  - Enable read-only mode (protects SD card)"
+    echo "  disable - Disable read-only mode (allows writes)"
+    echo "  status  - Check current read-only status"
+fi
+OVEREOF
+sudo chmod +x /usr/local/bin/overlayroot.sh
+
+echo ""
+read -p "Enable read-only mode for SD card now? (recommended for factory use) (y/n) " -n 1 -r
+echo
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    sudo /usr/local/bin/overlayroot.sh enable
+fi
+
+# Install additional tools for screen management
+echo "Installing additional screen management tools..."
+sudo apt-get install -y \
+    tvservice \
+    rpi-update || true
+
+# Configure .xinitrc with aggressive screen blanking prevention
+echo "Configuring X server with bulletproof screen settings..."
+cat > ~/.xinitrc << 'XINITEOF'
+#!/bin/sh
+# Start Piview - Factory Hardened
+
+# Disable screen blanking - MULTIPLE METHODS
+xset s off 2>/dev/null
+xset -dpms 2>/dev/null
+xset s noblank 2>/dev/null
+xset s 0 0 2>/dev/null
+
+# Disable power management
+xset -dpms 2>/dev/null
+xset dpms 0 0 0 2>/dev/null
+
+# Reset screen saver
+xset s reset 2>/dev/null
+
+# Disable console blanking
+setterm -blank 0 -powerdown 0 -powersave off 2>/dev/null
+
+# Wake up HDMI if sleeping
+tvservice -p 2>/dev/null || true
+
+# Hide cursor
+unclutter -idle 1 -root &
+
+# Keep screen alive script (runs in background)
+(
+    while true; do
+        sleep 30
+        xset s reset 2>/dev/null
+        xset -dpms 2>/dev/null
+        xset s off 2>/dev/null
+        # Move mouse slightly to prevent blanking
+        xdotool mousemove_relative -- 1 0 2>/dev/null
+        sleep 0.1
+        xdotool mousemove_relative -- -1 0 2>/dev/null
+    done
+) &
+
+# Start Piview
+exec /usr/bin/python3 /opt/piview/piview.py
+XINITEOF
+chmod +x ~/.xinitrc
+
+# Disable screen blanking at system level
+echo "Disabling screen blanking at system level..."
+sudo tee /etc/systemd/system/disable-screen-blanking.service > /dev/null << 'BLANKEOF'
+[Unit]
+Description=Disable Screen Blanking
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'echo 0 > /sys/module/kernel/parameters/consoleblank || true'
+ExecStart=/bin/bash -c 'setterm -blank 0 -powerdown 0 -powersave off || true'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+BLANKEOF
+
+sudo systemctl enable disable-screen-blanking.service
+
+# Disable sleep/suspend/hibernate
+echo "Disabling system sleep/suspend..."
+sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target 2>/dev/null || true
+
+# Configure kernel parameters to prevent blanking
+echo "Configuring kernel parameters..."
+if ! grep -q "consoleblank=0" /boot/cmdline.txt 2>/dev/null; then
+    sudo sed -i 's/$/ consoleblank=0/' /boot/cmdline.txt
+fi
+
+# Create log directory
+echo "Creating log directory..."
+sudo mkdir -p /var/log
+sudo touch /var/log/piview.log
+sudo chmod 666 /var/log/piview.log 2>/dev/null || true
+
+# Configure watchdog (if available)
+if command -v watchdog &> /dev/null; then
+    echo "Configuring watchdog..."
+    sudo systemctl enable watchdog 2>/dev/null || true
+fi
+
+# Reload systemd
+sudo systemctl daemon-reload
+sudo systemctl start disable-screen-blanking.service 2>/dev/null || true
+
+echo ""
+echo "=========================================="
+echo "Setup Complete!"
+echo "=========================================="
+echo ""
+echo "Configuration: $CONFIG_DIR/config.json"
+echo "URL: $USER_URL"
+echo "Refresh interval: $REFRESH_INTERVAL seconds"
+echo ""
+echo "To edit URL, edit the config file:"
+echo "  sudo nano $CONFIG_DIR/config.json"
+echo ""
+echo "To start Piview manually:"
+echo "  startx"
+echo ""
+echo "To enable auto-start on boot:"
+echo "  sudo systemctl enable piview.service"
+echo ""
+echo "To start the service now:"
+echo "  sudo systemctl start piview.service"
+echo ""
+echo "To close browser: Press ESC or 'q' key"
+echo "To stop Piview: Press Ctrl+C or stop service"
+echo ""
+
+if [ -f /usr/local/bin/overlayroot.sh ]; then
+    echo "Read-only mode commands:"
+    echo "  sudo overlayroot.sh enable   - Enable read-only"
+    echo "  sudo overlayroot.sh disable  - Disable read-only"
+    echo "  sudo overlayroot.sh status   - Check status"
+    echo ""
+fi
+
+read -p "Enable and start Piview service now? (y/n) " -n 1 -r
+echo
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    sudo systemctl enable piview.service
+    sudo systemctl start piview.service
+    echo "Piview service enabled and started!"
+fi
+
+echo ""
+echo "Setup complete! Reboot to start in kiosk mode."
+echo ""

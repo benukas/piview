@@ -1,0 +1,18 @@
+{
+  "urls": [
+    "https://example.com",
+    "https://example.org"
+  ],
+  "display_time": 30,
+  "browser": "chromium-browser",
+  "kiosk_flags": [
+    "--kiosk",
+    "--noerrdialogs",
+    "--disable-infobars",
+    "--disable-session-crashed-bubble",
+    "--disable-restore-session-state",
+    "--autoplay-policy=no-user-gesture-required",
+    "--disable-features=TranslateUI",
+    "--disable-ipc-flooding-protection"
+  ]
+}
