@@ -342,12 +342,10 @@ User=$USER
 Environment=DISPLAY=:0
 Environment=XAUTHORITY=/home/$USER/.Xauthority
 
-# Pre-start: Ensure screen blanking is disabled
-ExecStartPre=/bin/bash -c 'xset s off -dpms s noblank 2>/dev/null || true'
-ExecStartPre=/bin/bash -c 'setterm -blank 0 -powerdown 0 2>/dev/null || true'
-ExecStartPre=/bin/sleep 5
+# Pre-start: Wait for network and prepare
+ExecStartPre=/bin/sleep 3
 
-# Main start
+# Main start - startx will handle X server startup
 ExecStart=/usr/bin/startx
 
 # Aggressive restart policy
@@ -384,10 +382,11 @@ User=$USER
 Environment=DISPLAY=:0
 Environment=XAUTHORITY=/home/$USER/.Xauthority
 
-# Pre-start: Ensure screen blanking is disabled
+# Pre-start: Wait for X server and ensure screen blanking is disabled
+ExecStartPre=/bin/bash -c 'for i in {1..30}; do xset q >/dev/null 2>&1 && break || sleep 1; done'
 ExecStartPre=/bin/bash -c 'xset s off -dpms s noblank 2>/dev/null || true'
 ExecStartPre=/bin/bash -c 'setterm -blank 0 -powerdown 0 2>/dev/null || true'
-ExecStartPre=/bin/sleep 3
+ExecStartPre=/bin/sleep 2
 
 # Main start - run directly (X server already running)
 ExecStart=/usr/bin/python3 /opt/piview/piview.py

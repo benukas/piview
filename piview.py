@@ -12,6 +12,8 @@ import sys
 import signal
 import threading
 import logging
+import urllib.request
+import ssl
 from pathlib import Path
 from datetime import datetime
 
@@ -384,12 +386,52 @@ class Piview:
             self.log(f"Browser restart failed (attempt {self.browser_restart_count})", 'warning')
             time.sleep(5)
     
+    def wait_for_x_server(self, max_wait=30):
+        """Wait for X server to be ready"""
+        display = os.environ.get('DISPLAY', ':0')
+        waited = 0
+        while waited < max_wait:
+            try:
+                result = subprocess.run(
+                    ["xset", "q"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=2
+                )
+                if result.returncode == 0:
+                    self.log("X server is ready")
+                    return True
+            except Exception:
+                pass
+            
+            time.sleep(1)
+            waited += 1
+            if waited % 5 == 0:
+                self.log(f"Waiting for X server... ({waited}/{max_wait}s)", 'warning')
+        
+        self.log("X server not ready after waiting", 'error')
+        return False
+    
+    def find_browser(self):
+        """Find the browser executable"""
+        browsers = ["chromium-browser", "chromium", "google-chrome", "chrome"]
+        for browser in browsers:
+            try:
+                result = subprocess.run(
+                    ["which", browser],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=2
+                )
+                if result.returncode == 0:
+                    return browser
+            except Exception:
+                continue
+        return None
+    
     def check_url_connectivity(self, url):
         """Check if URL is reachable before opening browser"""
         try:
-            import urllib.request
-            import ssl
-            
             # Create SSL context that ignores certificate errors if configured
             if self.config.get("ignore_ssl_errors", True):
                 ssl_context = ssl.create_default_context()
@@ -417,12 +459,40 @@ class Piview:
         """Open a URL in kiosk mode with error handling and connection verification"""
         self.close_browser()
         
+        # Wait for X server to be ready
+        if not self.wait_for_x_server():
+            self.log("X server not available, cannot open browser", 'error')
+            return False
+        
         # Set display
         display = os.environ.get('DISPLAY', ':0')
         os.environ['DISPLAY'] = display
         
+        # Verify X server is actually working
+        try:
+            subprocess.run(
+                ["xset", "q"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+                check=True
+            )
+        except Exception as e:
+            self.log(f"X server verification failed: {e}", 'error')
+            return False
+        
         # Ensure screen blanking is disabled before opening
         self.prevent_screen_blanking()
+        
+        # Find browser executable
+        browser_cmd = self.find_browser()
+        if not browser_cmd:
+            self.log("No browser found. Please install chromium-browser or chromium", 'error')
+            return False
+        
+        # Update config with found browser
+        if browser_cmd != self.config.get("browser"):
+            self.log(f"Using browser: {browser_cmd} (instead of {self.config.get('browser')})", 'warning')
         
         # Check URL connectivity before opening browser
         max_retries = self.config.get("max_connection_retries", 3)
@@ -461,9 +531,10 @@ class Piview:
                 if flag not in kiosk_flags:
                     kiosk_flags.append(flag)
         
-        cmd = [self.config["browser"]] + kiosk_flags + [url]
+        cmd = [browser_cmd] + kiosk_flags + [url]
         
         try:
+            self.log(f"Launching browser: {' '.join(cmd)}")
             self.browser_process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.DEVNULL,
@@ -472,12 +543,14 @@ class Piview:
             )
             
             # Wait a moment to see if it starts successfully
-            time.sleep(3)  # Give it more time to load
+            time.sleep(4)  # Give it time to load
             if self.browser_process.poll() is not None:
-                self.log("Browser exited immediately after start", 'error')
+                exit_code = self.browser_process.returncode
+                self.log(f"Browser exited immediately after start (exit code: {exit_code})", 'error')
+                # Try to get stderr for debugging
                 return False
             
-            self.log(f"Browser opened: {url}")
+            self.log(f"Browser opened successfully: {url}")
             
             # After opening, try to dismiss any SSL warnings
             if self.config.get("ignore_ssl_errors", True):
@@ -486,7 +559,7 @@ class Piview:
             
             return True
         except FileNotFoundError:
-            self.log(f"Error: {self.config['browser']} not found. Please install it.", 'error')
+            self.log(f"Error: Browser executable not found: {browser_cmd}", 'error')
             return False
         except Exception as e:
             self.log(f"Error opening browser: {e}", 'error')
