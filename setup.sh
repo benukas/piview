@@ -225,60 +225,170 @@ else
 fi
 
 # Configure network failover (LAN priority with WiFi fallback)
-echo "Configuring network failover (LAN priority, WiFi fallback)..."
-if command -v nmcli &> /dev/null; then
-    # NetworkManager is available - set up metrics for failover
-    ETH_INTERFACE=""
-    WIFI_INTERFACE=""
+echo "" >&2
+ask_tty_yn "Would you like to setup network failover? (if LAN goes down, switch to WiFi)" FAILOVER_REPLY "n"
+
+FAILOVER_WIFI_SSID=""
+FAILOVER_WIFI_PASSWORD=""
+FAILOVER_WIFI_INTERFACE=""
+
+if [[ $FAILOVER_REPLY =~ ^[Yy]$ ]]; then
+    echo "" >&2
+    ask_tty "Enter WiFi SSID for failover (network name)" FAILOVER_WIFI_SSID ""
     
-    # Find ethernet interface
-    if [ -d /sys/class/net/eth0 ]; then
-        ETH_INTERFACE="eth0"
-    else
-        for iface in /sys/class/net/eth* /sys/class/net/en*; do
-            if [ -d "$iface" ]; then
-                ETH_INTERFACE=$(basename "$iface")
-                break
+    if [ -n "$FAILOVER_WIFI_SSID" ]; then
+        # Ask if password protected
+        echo "" >&2
+        ask_tty_yn "Is this failover network password protected? (WPA2)" FAILOVER_PASS_REPLY "y"
+        
+        if [[ $FAILOVER_PASS_REPLY =~ ^[Yy]$ ]]; then
+            # Get password (hidden)
+            echo -n "Enter WiFi password: " >&2
+            stty -echo </dev/tty 2>/dev/null || true
+            read -r FAILOVER_WIFI_PASSWORD </dev/tty 2>/dev/null || FAILOVER_WIFI_PASSWORD=""
+            stty echo </dev/tty 2>/dev/null || true
+            echo "" >&2
+        fi
+        
+        # Configure failover WiFi network in wpa_supplicant
+        echo "Configuring failover WiFi network..."
+        
+        # Backup existing wpa_supplicant.conf if not already backed up
+        if [ ! -f /etc/wpa_supplicant/wpa_supplicant.conf.backup ] && [ -f /etc/wpa_supplicant/wpa_supplicant.conf ]; then
+            sudo cp /etc/wpa_supplicant/wpa_supplicant.conf /etc/wpa_supplicant/wpa_supplicant.conf.backup
+        fi
+        
+        # Read existing config or create new
+        if [ -f /etc/wpa_supplicant/wpa_supplicant.conf ]; then
+            # Append failover network to existing config
+            if [[ $FAILOVER_PASS_REPLY =~ ^[Yy]$ ]]; then
+                # Generate PSK
+                if command -v wpa_passphrase &> /dev/null; then
+                    FAILOVER_PSK=$(wpa_passphrase "$FAILOVER_WIFI_SSID" "$FAILOVER_WIFI_PASSWORD" 2>/dev/null | grep "psk=" | grep -v "#" | cut -d= -f2 | tr -d ' ')
+                else
+                    FAILOVER_PSK="\"$FAILOVER_WIFI_PASSWORD\""
+                fi
+                
+                echo "" | sudo tee -a /etc/wpa_supplicant/wpa_supplicant.conf > /dev/null
+                sudo tee -a /etc/wpa_supplicant/wpa_supplicant.conf > /dev/null << WPAFAILOVER
+network={
+    ssid="$FAILOVER_WIFI_SSID"
+    psk=$FAILOVER_PSK
+    key_mgmt=WPA-PSK
+    priority=5
+}
+WPAFAILOVER
+            else
+                echo "" | sudo tee -a /etc/wpa_supplicant/wpa_supplicant.conf > /dev/null
+                sudo tee -a /etc/wpa_supplicant/wpa_supplicant.conf > /dev/null << WPAFAILOVER
+network={
+    ssid="$FAILOVER_WIFI_SSID"
+    key_mgmt=NONE
+    priority=5
+}
+WPAFAILOVER
             fi
-        done
-    fi
-    
-    # Find WiFi interface (already detected earlier if WiFi was configured)
-    if [ -z "$WIFI_INTERFACE" ]; then
+        else
+            # Create new config with failover network
+            ask_tty "Enter country code (e.g., US, GB, DE)" COUNTRY_CODE "US"
+            
+            if [[ $FAILOVER_PASS_REPLY =~ ^[Yy]$ ]]; then
+                if command -v wpa_passphrase &> /dev/null; then
+                    FAILOVER_PSK=$(wpa_passphrase "$FAILOVER_WIFI_SSID" "$FAILOVER_WIFI_PASSWORD" 2>/dev/null | grep "psk=" | grep -v "#" | cut -d= -f2 | tr -d ' ')
+                else
+                    FAILOVER_PSK="\"$FAILOVER_WIFI_PASSWORD\""
+                fi
+                
+                sudo tee /etc/wpa_supplicant/wpa_supplicant.conf > /dev/null << WPAFAILOVER
+ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
+update_config=1
+country=$COUNTRY_CODE
+
+network={
+    ssid="$FAILOVER_WIFI_SSID"
+    psk=$FAILOVER_PSK
+    key_mgmt=WPA-PSK
+    priority=5
+}
+WPAFAILOVER
+            else
+                sudo tee /etc/wpa_supplicant/wpa_supplicant.conf > /dev/null << WPAFAILOVER
+ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
+update_config=1
+country=$COUNTRY_CODE
+
+network={
+    ssid="$FAILOVER_WIFI_SSID"
+    key_mgmt=NONE
+    priority=5
+}
+WPAFAILOVER
+            fi
+        fi
+        
+        sudo chmod 600 /etc/wpa_supplicant/wpa_supplicant.conf
+        
+        # Find WiFi interface
         if [ -d /sys/class/net/wlan0 ]; then
-            WIFI_INTERFACE="wlan0"
+            FAILOVER_WIFI_INTERFACE="wlan0"
         else
             for iface in /sys/class/net/wlan* /sys/class/net/wlp*; do
                 if [ -d "$iface" ]; then
-                    WIFI_INTERFACE=$(basename "$iface")
+                    FAILOVER_WIFI_INTERFACE=$(basename "$iface")
                     break
                 fi
             done
         fi
-    fi
-    
-    # Configure metrics if interfaces found
-    if [ -n "$ETH_INTERFACE" ]; then
-        # Set Ethernet to higher priority (lower metric = higher priority)
-        ETH_CONN=$(nmcli -t -f NAME,DEVICE connection show | grep "$ETH_INTERFACE" | cut -d: -f1 | head -1)
-        if [ -n "$ETH_CONN" ]; then
-            sudo nmcli connection modify "$ETH_CONN" ipv4.route-metric 100 2>/dev/null || true
-            echo "  ✓ Ethernet ($ETH_INTERFACE) set to priority 1 (metric 100)"
+        
+        # Configure network priorities
+        if command -v nmcli &> /dev/null; then
+            # NetworkManager is available - set up metrics for failover
+            ETH_INTERFACE=""
+            
+            # Find ethernet interface
+            if [ -d /sys/class/net/eth0 ]; then
+                ETH_INTERFACE="eth0"
+            else
+                for iface in /sys/class/net/eth* /sys/class/net/en*; do
+                    if [ -d "$iface" ]; then
+                        ETH_INTERFACE=$(basename "$iface")
+                        break
+                    fi
+                done
+            fi
+            
+            # Configure metrics if interfaces found
+            if [ -n "$ETH_INTERFACE" ]; then
+                # Set Ethernet to higher priority (lower metric = higher priority)
+                ETH_CONN=$(nmcli -t -f NAME,DEVICE connection show | grep "$ETH_INTERFACE" | cut -d: -f1 | head -1)
+                if [ -n "$ETH_CONN" ]; then
+                    sudo nmcli connection modify "$ETH_CONN" ipv4.route-metric 100 2>/dev/null || true
+                    echo "  ✓ Ethernet ($ETH_INTERFACE) set to priority 1 (metric 100)"
+                fi
+            fi
+            
+            if [ -n "$FAILOVER_WIFI_INTERFACE" ]; then
+                # Set WiFi to lower priority (higher metric = lower priority)
+                WIFI_CONN=$(nmcli -t -f NAME,DEVICE connection show | grep "$FAILOVER_WIFI_INTERFACE" | cut -d: -f1 | head -1)
+                if [ -n "$WIFI_CONN" ]; then
+                    sudo nmcli connection modify "$WIFI_CONN" ipv4.route-metric 200 2>/dev/null || true
+                    echo "  ✓ WiFi ($FAILOVER_WIFI_INTERFACE) set to priority 2 (metric 200)"
+                fi
+            fi
+            
+            echo "  ✓ Network failover configured: LAN preferred, WiFi ($FAILOVER_WIFI_SSID) fallback"
+        else
+            echo "  ✓ Network failover configured: LAN preferred, WiFi ($FAILOVER_WIFI_SSID) fallback"
+            echo "  Note: NetworkManager not available, failover handled by Piview's health check"
         fi
-    fi
-    
-    if [ -n "$WIFI_INTERFACE" ]; then
-        # Set WiFi to lower priority (higher metric = lower priority)
-        WIFI_CONN=$(nmcli -t -f NAME,DEVICE connection show | grep "$WIFI_INTERFACE" | cut -d: -f1 | head -1)
-        if [ -n "$WIFI_CONN" ]; then
-            sudo nmcli connection modify "$WIFI_CONN" ipv4.route-metric 200 2>/dev/null || true
-            echo "  ✓ WiFi ($WIFI_INTERFACE) set to priority 2 (metric 200)"
-            echo "  ✓ Network failover configured: LAN preferred, WiFi fallback"
-        fi
+        
+        # Save failover WiFi info to config for Piview
+        FAILOVER_CONFIG="{\"failover_wifi_ssid\": \"$FAILOVER_WIFI_SSID\", \"failover_wifi_interface\": \"$FAILOVER_WIFI_INTERFACE\"}"
+    else
+        echo "No WiFi SSID provided, skipping network failover configuration." >&2
     fi
 else
-    echo "  Note: NetworkManager not available, using traditional networking"
-    echo "  Network failover will be handled by Piview's health check"
+    echo "Skipping network failover configuration."
 fi
 
 # Install dependencies

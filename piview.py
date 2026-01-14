@@ -537,7 +537,14 @@ class Piview:
         return None
     
     def find_wifi_interface(self):
-        """Find the WiFi interface name"""
+        """Find the WiFi interface name - prefer configured failover interface"""
+        # Use configured failover interface if available
+        if self.config.get("network_failover_enabled", False):
+            configured_interface = self.config.get("failover_wifi_interface", "")
+            if configured_interface and os.path.exists(f"/sys/class/net/{configured_interface}"):
+                return configured_interface
+        
+        # Fallback to auto-detection
         interfaces = ["wlan0", "wlp1s0", "wlp2s0"]  # Common WiFi names
         for iface in interfaces:
             if os.path.exists(f"/sys/class/net/{iface}"):
@@ -553,12 +560,18 @@ class Piview:
         """
         If LAN is acting up but technically 'connected', 
         force it down to trigger the WiFi failover.
+        Only works if network failover is enabled in config.
         """
+        if not self.config.get("network_failover_enabled", False):
+            self.log("Network failover not enabled in config, skipping", 'warning')
+            return
+        
         self.log("Connectivity lost on primary port. Forcing network failover...", 'warning')
         self.network_failover_triggered = True
         
         eth_interface = self.find_ethernet_interface()
         wifi_interface = self.find_wifi_interface()
+        failover_ssid = self.config.get("failover_wifi_ssid", "")
         
         if not eth_interface:
             self.log("No ethernet interface found, skipping failover", 'warning')
@@ -567,6 +580,9 @@ class Piview:
         if not wifi_interface:
             self.log("No WiFi interface found, cannot failover", 'error')
             return
+        
+        if failover_ssid:
+            self.log(f"Switching to failover WiFi network: {failover_ssid}", 'info')
         
         try:
             # Try NetworkManager first (modern Pi OS)
