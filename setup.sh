@@ -707,10 +707,45 @@ sudo mkdir -p /var/log
 sudo touch /var/log/piview.log
 sudo chmod 666 /var/log/piview.log 2>/dev/null || true
 
-# Configure watchdog (if available)
-if command -v watchdog &> /dev/null; then
-    echo "Configuring watchdog..."
+# Configure hardware watchdog (The "Nuke" Option - for kernel freezes)
+echo "" >&2
+ask_tty_yn "Enable hardware watchdog? (reboots Pi if kernel freezes - recommended for factory)" WATCHDOG_REPLY "y"
+if [[ $WATCHDOG_REPLY =~ ^[Yy]$ ]] || [ -z "$WATCHDOG_REPLY" ]; then
+    echo "Configuring hardware watchdog..."
+    
+    # Install watchdog package
+    sudo apt-get install -y watchdog || true
+    
+    # Enable watchdog in boot config (Raspberry Pi only)
+    if [ "$IS_RASPBERRY_PI" = true ] && [ -f /boot/config.txt ]; then
+        if ! grep -q "^dtparam=watchdog=on" /boot/config.txt 2>/dev/null; then
+            echo "Enabling watchdog in /boot/config.txt..."
+            echo "dtparam=watchdog=on" | sudo tee -a /boot/config.txt > /dev/null
+        else
+            echo "Watchdog already enabled in /boot/config.txt"
+        fi
+    fi
+    
+    # Configure watchdog service
+    if [ -f /etc/watchdog.conf ]; then
+        # Uncomment watchdog-device line
+        sudo sed -i 's/^#watchdog-device/watchdog-device/' /etc/watchdog.conf 2>/dev/null || true
+        sudo sed -i 's/^#.*watchdog-device.*=.*\/dev\/watchdog/watchdog-device = \/dev\/watchdog/' /etc/watchdog.conf 2>/dev/null || true
+        
+        # Ensure the line exists
+        if ! grep -q "^watchdog-device" /etc/watchdog.conf 2>/dev/null; then
+            echo "watchdog-device = /dev/watchdog" | sudo tee -a /etc/watchdog.conf > /dev/null
+        fi
+    fi
+    
+    # Enable and start watchdog service
     sudo systemctl enable watchdog 2>/dev/null || true
+    sudo systemctl start watchdog 2>/dev/null || true
+    
+    echo "✓ Hardware watchdog configured (Pi will auto-reboot on kernel freeze)"
+    echo "  Note: Reboot required for /boot/config.txt changes to take effect"
+else
+    echo "Hardware watchdog skipped"
 fi
 
 # Reload systemd

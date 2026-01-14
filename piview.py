@@ -464,6 +464,54 @@ class Piview:
                 continue
         return None
     
+    def fix_chromium_exit_status(self):
+        """Force Chromium to think it exited cleanly - prevents 'Chromium didn't shut down correctly' nag bar"""
+        try:
+            # Find user-data-dir from kiosk flags
+            user_data_dir = None
+            for flag in self.config.get("kiosk_flags", []):
+                if flag.startswith("--user-data-dir="):
+                    user_data_dir = flag.split("=", 1)[1]
+                    break
+            
+            # Default to the standard location if not specified
+            if not user_data_dir:
+                user_data_dir = "/tmp/chromium-ssl-bypass"
+            
+            pref_file = Path(user_data_dir) / "Default" / "Preferences"
+            
+            # Create directory structure if it doesn't exist
+            pref_file.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Read existing preferences or create new
+            prefs = {}
+            if pref_file.exists():
+                try:
+                    with open(pref_file, 'r') as f:
+                        prefs = json.load(f)
+                except (json.JSONDecodeError, IOError):
+                    prefs = {}
+            
+            # Set exit status to clean
+            if "profile" not in prefs:
+                prefs["profile"] = {}
+            prefs["profile"]["exited_cleanly"] = True
+            prefs["profile"]["exit_type"] = "Normal"
+            
+            # Also set in session state if it exists
+            if "session" not in prefs:
+                prefs["session"] = {}
+            prefs["session"]["restore_on_startup"] = 0  # Don't restore sessions
+            
+            # Write back
+            with open(pref_file, 'w') as f:
+                json.dump(prefs, f)
+            
+            self.log("Chromium exit status fixed (exited cleanly)")
+        except Exception as e:
+            # Silently fail - this is a nice-to-have, not critical
+            pass
+    
     def check_url_connectivity(self, url):
         """Check if URL is reachable before opening browser"""
         try:
@@ -569,6 +617,9 @@ class Piview:
                 flag_name = flag.split("=")[0] if "=" in flag else flag
                 if not any(f.startswith(flag_name) for f in kiosk_flags):
                     kiosk_flags.append(flag)
+        
+        # Fix "Exited Cleanly" nag bar - force Chromium to think it exited cleanly
+        self.fix_chromium_exit_status()
         
         cmd = [browser_cmd] + kiosk_flags + [url]
         
