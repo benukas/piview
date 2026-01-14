@@ -26,6 +26,9 @@ DEFAULT_CONFIG = {
     "browser": "chromium-browser",
     "health_check_interval": 10,  # seconds between health checks
     "max_browser_restarts": 10,  # max restarts before giving up
+    "ignore_ssl_errors": True,  # Ignore SSL certificate errors (for self-signed certs)
+    "connection_retry_delay": 5,  # seconds to wait before retrying connection
+    "max_connection_retries": 3,  # max retries for connection failures
     "kiosk_flags": [
         "--kiosk",
         "--noerrdialogs",
@@ -41,7 +44,13 @@ DEFAULT_CONFIG = {
         "--disable-dev-shm-usage",
         "--no-sandbox",
         "--disable-gpu",
-        "--disable-software-rasterizer"
+        "--disable-software-rasterizer",
+        "--ignore-certificate-errors",
+        "--ignore-ssl-errors",
+        "--ignore-certificate-errors-spki-list",
+        "--allow-running-insecure-content",
+        "--disable-web-security",
+        "--test-type"
     ]
 }
 
@@ -54,6 +63,8 @@ class Piview:
         self.last_browser_check = time.time()
         self.last_screen_keepalive = time.time()
         self.last_health_check = time.time()
+        self.connection_failures = 0
+        self.last_url_check = 0
         
         # Setup logging
         self.setup_logging()
@@ -318,9 +329,19 @@ class Piview:
                 pass
     
     def refresh_page(self):
-        """Refresh the current page"""
+        """Refresh the current page with connection verification"""
         if self.browser_process and self.browser_process.poll() is None:
             try:
+                # Check URL connectivity before refresh
+                url = self.config.get("url", "")
+                if url and time.time() - self.last_url_check > 30:  # Check every 30 seconds
+                    if not self.check_url_connectivity(url):
+                        self.log("URL not reachable, restarting browser...", 'warning')
+                        self.restart_browser()
+                        self.last_url_check = time.time()
+                        return True
+                    self.last_url_check = time.time()
+                
                 # Try F5 key first
                 subprocess.run(
                     ["xdotool", "key", "F5"],
@@ -330,9 +351,9 @@ class Piview:
                 )
                 self.log("Page refreshed via F5")
                 return True
-            except Exception:
+            except Exception as e:
                 # If xdotool fails, reload the page by restarting browser
-                self.log("F5 refresh failed, restarting browser...", 'warning')
+                self.log(f"F5 refresh failed ({e}), restarting browser...", 'warning')
                 self.restart_browser()
                 return True
         else:
@@ -363,8 +384,37 @@ class Piview:
             self.log(f"Browser restart failed (attempt {self.browser_restart_count})", 'warning')
             time.sleep(5)
     
+    def check_url_connectivity(self, url):
+        """Check if URL is reachable before opening browser"""
+        try:
+            import urllib.request
+            import ssl
+            
+            # Create SSL context that ignores certificate errors if configured
+            if self.config.get("ignore_ssl_errors", True):
+                ssl_context = ssl.create_default_context()
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
+            else:
+                ssl_context = None
+            
+            # Try to connect
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            try:
+                with urllib.request.urlopen(req, timeout=10, context=ssl_context) as response:
+                    return response.status in [200, 301, 302, 303, 307, 308]
+            except urllib.error.HTTPError as e:
+                # HTTP error but connection works
+                return e.code < 500
+            except (urllib.error.URLError, Exception) as e:
+                self.log(f"URL connectivity check failed: {e}", 'warning')
+                return False
+        except Exception as e:
+            self.log(f"Connectivity check error: {e}", 'warning')
+            return False
+    
     def open_url(self, url):
-        """Open a URL in kiosk mode with error handling"""
+        """Open a URL in kiosk mode with error handling and connection verification"""
         self.close_browser()
         
         # Set display
@@ -374,7 +424,44 @@ class Piview:
         # Ensure screen blanking is disabled before opening
         self.prevent_screen_blanking()
         
-        cmd = [self.config["browser"]] + self.config["kiosk_flags"] + [url]
+        # Check URL connectivity before opening browser
+        max_retries = self.config.get("max_connection_retries", 3)
+        retry_delay = self.config.get("connection_retry_delay", 5)
+        
+        url_reachable = False
+        for attempt in range(max_retries):
+            if self.check_url_connectivity(url):
+                url_reachable = True
+                self.connection_failures = 0
+                break
+            else:
+                self.log(f"URL not reachable, retrying ({attempt + 1}/{max_retries})...", 'warning')
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+        
+        if not url_reachable:
+            self.connection_failures += 1
+            self.log(f"URL not reachable after {max_retries} attempts, opening browser anyway (may show error)", 'warning')
+        else:
+            self.log(f"URL connectivity verified: {url}")
+        
+        # Build browser command with SSL flags if needed
+        kiosk_flags = self.config["kiosk_flags"].copy()
+        
+        # Add SSL bypass flags if configured
+        if self.config.get("ignore_ssl_errors", True):
+            ssl_flags = [
+                "--ignore-certificate-errors",
+                "--ignore-ssl-errors",
+                "--ignore-certificate-errors-spki-list",
+                "--allow-running-insecure-content"
+            ]
+            # Add flags that aren't already in the list
+            for flag in ssl_flags:
+                if flag not in kiosk_flags:
+                    kiosk_flags.append(flag)
+        
+        cmd = [self.config["browser"]] + kiosk_flags + [url]
         
         try:
             self.browser_process = subprocess.Popen(
@@ -385,12 +472,18 @@ class Piview:
             )
             
             # Wait a moment to see if it starts successfully
-            time.sleep(2)
+            time.sleep(3)  # Give it more time to load
             if self.browser_process.poll() is not None:
                 self.log("Browser exited immediately after start", 'error')
                 return False
             
             self.log(f"Browser opened: {url}")
+            
+            # After opening, try to dismiss any SSL warnings
+            if self.config.get("ignore_ssl_errors", True):
+                time.sleep(2)
+                self.dismiss_ssl_warnings()
+            
             return True
         except FileNotFoundError:
             self.log(f"Error: {self.config['browser']} not found. Please install it.", 'error')
@@ -398,6 +491,47 @@ class Piview:
         except Exception as e:
             self.log(f"Error opening browser: {e}", 'error')
             return False
+    
+    def dismiss_ssl_warnings(self):
+        """Try to automatically dismiss SSL certificate warnings"""
+        try:
+            # Wait a moment for page to load
+            time.sleep(1)
+            
+            # Try to click "Advanced" or "Proceed" buttons
+            # These are common patterns in Chromium SSL error pages
+            subprocess.run(
+                ["xdotool", "key", "Tab", "Tab", "Tab", "Return"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2
+            )
+            
+            # Alternative: Try typing the URL again to force reload
+            time.sleep(1)
+            subprocess.run(
+                ["xdotool", "key", "ctrl+l"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=1
+            )
+            time.sleep(0.5)
+            subprocess.run(
+                ["xdotool", "type", self.config.get("url", "")],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2
+            )
+            time.sleep(0.5)
+            subprocess.run(
+                ["xdotool", "key", "Return"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=1
+            )
+        except Exception as e:
+            # Silently fail - SSL flags should handle most cases
+            pass
     
     def keyboard_listener(self):
         """Listen for keyboard input to close browser"""
@@ -502,6 +636,19 @@ class Piview:
                         last_refresh = time.time()
                 else:
                     consecutive_failures = 0
+                    
+                    # Periodically check if URL is still reachable
+                    if time.time() - self.last_url_check > 60:  # Check every minute
+                        url = self.config.get("url", "")
+                        if url:
+                            if not self.check_url_connectivity(url):
+                                self.connection_failures += 1
+                                self.log(f"URL connectivity lost, restarting browser (failure #{self.connection_failures})...", 'warning')
+                                self.restart_browser()
+                                last_refresh = time.time()
+                            else:
+                                self.connection_failures = 0
+                        self.last_url_check = time.time()
             
             # Auto-refresh
             elapsed = time.time() - last_refresh

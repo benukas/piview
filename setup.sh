@@ -65,6 +65,16 @@ USER_URL=${USER_URL:-"https://example.com"}
 read -p "Enter refresh interval in seconds (default: 60): " REFRESH_INTERVAL
 REFRESH_INTERVAL=${REFRESH_INTERVAL:-60}
 
+# Ask about SSL certificate handling
+echo ""
+read -p "Ignore SSL certificate errors? (recommended for factory/internal networks) (y/n) " -n 1 -r
+echo
+if [[ $REPLY =~ ^[Yy]$ ]] || [ -z "$REPLY" ]; then
+    IGNORE_SSL="true"
+else
+    IGNORE_SSL="false"
+fi
+
 # Create config file
 echo "Creating configuration..."
 sudo tee $CONFIG_DIR/config.json > /dev/null << EOF
@@ -72,6 +82,9 @@ sudo tee $CONFIG_DIR/config.json > /dev/null << EOF
   "url": "$USER_URL",
   "refresh_interval": $REFRESH_INTERVAL,
   "browser": "chromium-browser",
+  "ignore_ssl_errors": $IGNORE_SSL,
+  "connection_retry_delay": 5,
+  "max_connection_retries": 3,
   "kiosk_flags": [
     "--kiosk",
     "--noerrdialogs",
@@ -83,7 +96,12 @@ sudo tee $CONFIG_DIR/config.json > /dev/null << EOF
     "--disable-ipc-flooding-protection",
     "--disable-background-networking",
     "--disable-default-apps",
-    "--disable-sync"
+    "--disable-sync",
+    "--ignore-certificate-errors",
+    "--ignore-ssl-errors",
+    "--ignore-certificate-errors-spki-list",
+    "--allow-running-insecure-content",
+    "--test-type"
   ]
 }
 EOF

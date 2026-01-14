@@ -112,6 +112,9 @@ The configuration file is located at `/etc/piview/config.json`
 - **url**: Single URL to display (required)
 - **refresh_interval**: Seconds between auto-refresh (default: 60)
 - **browser**: Browser executable (default: "chromium-browser")
+- **ignore_ssl_errors**: Ignore SSL certificate errors (default: true) - Useful for self-signed certs in factory environments
+- **connection_retry_delay**: Seconds to wait before retrying failed connections (default: 5)
+- **max_connection_retries**: Maximum retries for connection failures (default: 3)
 - **kiosk_flags**: Browser flags for kiosk mode (usually don't need to change)
 
 ### Changing URL
@@ -215,11 +218,16 @@ sudo systemctl restart ntp
 - Install if missing: `sudo apt-get install chromium-browser xserver-xorg xinit`
 - Check X server is running: `echo $DISPLAY`
 
-### URLs not loading
+### URLs not loading / SSL errors / Connection issues
 
+- **SSL Certificate Errors**: Piview is configured by default to ignore SSL errors. Check config: `cat /etc/piview/config.json | grep ignore_ssl_errors`
+- **Connection Failures**: Piview automatically retries connections. Check logs: `tail -f /var/log/piview.log`
 - Verify internet connection: `ping google.com`
-- Check URLs are accessible: `curl <url>`
+- Check URLs are accessible: `curl -k <url>` (the -k flag ignores SSL like Piview does)
 - Ensure URLs include `http://` or `https://`
+- If using self-signed certificates, ensure `ignore_ssl_errors` is set to `true` in config
+- Check network connectivity: `curl -v <url>`
+- Browser will automatically restart on connection failures
 
 ### Service won't start
 
