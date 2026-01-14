@@ -46,8 +46,10 @@ echo "  - Refresh interval"
 echo "  - SSL certificate handling"
 echo "  - Read-only mode (optional)"
 echo ""
-read -p "Press Enter to continue with setup..."
-echo ""
+if [ -t 0 ]; then
+    read -p "Press Enter to continue with setup..." </dev/tty
+    echo ""
+fi
 ./setup.sh
 
 # Cleanup
