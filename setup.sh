@@ -314,11 +314,52 @@ ask_tty "Enter the URL to display" USER_URL "https://example.com"
 ask_tty "Enter refresh interval (seconds)" REFRESH_INTERVAL "60"
 
 # Ask about SSL certificate handling
-ask_tty_yn "Ignore SSL certificate errors? (recommended for factory/internal networks)" SSL_REPLY "y"
-if [[ $SSL_REPLY =~ ^[Yy]$ ]] || [ -z "$SSL_REPLY" ]; then
+echo "" >&2
+echo "SSL Certificate Options:" >&2
+echo "  1) Install certificate file (recommended - most secure)" >&2
+echo "  2) Ignore SSL errors (for testing/development)" >&2
+echo "  3) Use system defaults (no special handling)" >&2
+ask_tty "Choose option (1/2/3)" SSL_OPTION "2"
+
+if [[ $SSL_OPTION == "1" ]]; then
+    IGNORE_SSL="false"
+    echo "" >&2
+    ask_tty "Enter path to certificate file (.crt or .pem)" CERT_PATH ""
+    
+    if [ -n "$CERT_PATH" ] && [ -f "$CERT_PATH" ]; then
+        echo "Installing certificate..." >&2
+        # Install certificate to system store
+        sudo cp "$CERT_PATH" /usr/local/share/ca-certificates/piview-custom.crt
+        sudo update-ca-certificates
+        
+        # Also install to Chromium's certificate store
+        CERT_DIR="$HOME/.pki/nssdb"
+        mkdir -p "$CERT_DIR"
+        
+        # Use certutil if available (part of libnss3-tools)
+        if command -v certutil &> /dev/null; then
+            certutil -d "sql:$CERT_DIR" -A -t "C,," -n "Piview Custom Cert" -i "$CERT_PATH" 2>/dev/null || true
+        else
+            echo "Installing certutil for certificate management..." >&2
+            sudo apt-get install -y libnss3-tools || true
+            if command -v certutil &> /dev/null; then
+                certutil -d "sql:$CERT_DIR" -A -t "C,," -n "Piview Custom Cert" -i "$CERT_PATH" 2>/dev/null || true
+            fi
+        fi
+        
+        echo "Certificate installed successfully!" >&2
+        CERT_INSTALLED="true"
+    else
+        echo "Certificate file not found, falling back to ignore SSL errors" >&2
+        IGNORE_SSL="true"
+        CERT_INSTALLED="false"
+    fi
+elif [[ $SSL_OPTION == "2" ]]; then
     IGNORE_SSL="true"
+    CERT_INSTALLED="false"
 else
     IGNORE_SSL="false"
+    CERT_INSTALLED="false"
 fi
 echo "" >&2
 

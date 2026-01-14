@@ -553,21 +553,16 @@ class Piview:
         # Build browser command with SSL flags if needed
         kiosk_flags = self.config["kiosk_flags"].copy()
         
-        # Ensure SSL bypass flags are present if configured
-        # These flags should prevent SSL warnings from appearing at all
+        # Only add SSL bypass flags if ignore_ssl_errors is true
+        # If certificates are installed, we don't need these flags
         if self.config.get("ignore_ssl_errors", True):
-            # Create a temporary user data dir to avoid SSL certificate storage issues
-            import tempfile
-            ssl_user_data = tempfile.mkdtemp(prefix="chromium-ssl-")
-            
-            # Add/update SSL bypass flags
+            # Add SSL bypass flags only if needed
             ssl_flags = [
                 "--ignore-certificate-errors",
                 "--ignore-ssl-errors",
                 "--ignore-certificate-errors-spki-list",
                 "--allow-running-insecure-content",
-                "--unsafely-treat-insecure-origin-as-secure",
-                f"--user-data-dir={ssl_user_data}"
+                "--unsafely-treat-insecure-origin-as-secure"
             ]
             # Add flags that aren't already in the list
             for flag in ssl_flags:
