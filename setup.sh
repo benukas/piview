@@ -212,6 +212,7 @@ fi
 # Update system
 echo ""
 echo "Updating package lists..."
+echo "This may take a few minutes on first run..."
 sudo apt-get update
 
 # Ask about upgrading packages (optional - some orgs prefer install-only)

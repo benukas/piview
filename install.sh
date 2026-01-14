@@ -24,18 +24,35 @@ INSTALL_DIR="$HOME/piview-install"
 mkdir -p "$INSTALL_DIR"
 cd "$INSTALL_DIR"
 
-echo "Downloading Piview..."
-curl -sSL https://github.com/benukas/piview/archive/refs/heads/main.tar.gz -o piview.tar.gz
-tar -xzf piview.tar.gz --strip-components=1
-rm -f piview.tar.gz
-chmod +x setup.sh
+echo "Downloading Piview from GitHub..."
+echo "This may take a moment depending on your connection..."
+echo ""
 
-echo ""
-echo -e "${GREEN}Download complete!${NC}"
-echo ""
-echo "Running setup now (prompts will work even when piped)..."
-echo ""
-./setup.sh
+# Download with progress indicator (remove -s to show progress)
+if curl -L --progress-bar https://github.com/benukas/piview/archive/refs/heads/main.tar.gz -o piview.tar.gz; then
+    echo ""
+    echo "Extracting files..."
+    tar -xzf piview.tar.gz --strip-components=1
+    rm -f piview.tar.gz
+    
+    if [ ! -f setup.sh ]; then
+        echo -e "${RED}Error: setup.sh not found after download${NC}"
+        exit 1
+    fi
+    
+    chmod +x setup.sh
+    
+    echo ""
+    echo -e "${GREEN}Download complete!${NC}"
+    echo ""
+    echo "Running setup now (prompts will work even when piped)..."
+    echo ""
+    ./setup.sh
+else
+    echo -e "${RED}Error: Failed to download Piview from GitHub${NC}"
+    echo "Please check your internet connection and try again."
+    exit 1
+fi
 
 # Cleanup
 cd "$HOME"
