@@ -181,8 +181,6 @@ if [ "$NEED_X_SERVER" = true ]; then
         unclutter \
         python3 \
         python3-pip \
-        ntp \
-        ntpdate \
         watchdog || true
 else
     # Desktop already has X server, just install browser and tools
@@ -192,8 +190,6 @@ else
         unclutter \
         python3 \
         python3-pip \
-        ntp \
-        ntpdate \
         watchdog || true
 fi
 
