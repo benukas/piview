@@ -199,10 +199,44 @@ fi
 
 # Sync time immediately
 echo "Syncing time with NTP..."
-sudo systemctl stop ntp 2>/dev/null || true
-sudo ntpdate -s time.nist.gov || sudo ntpdate -s pool.ntp.org || true
-sudo systemctl start ntp
-sudo systemctl enable ntp
+# Check which time sync service is available
+if systemctl list-unit-files | grep -q "^ntp.service"; then
+    # Traditional NTP service
+    sudo systemctl stop ntp 2>/dev/null || true
+    if command -v ntpdate &> /dev/null; then
+        sudo ntpdate -s time.nist.gov || sudo ntpdate -s pool.ntp.org || true
+    fi
+    sudo systemctl start ntp 2>/dev/null || true
+    sudo systemctl enable ntp 2>/dev/null || true
+elif systemctl list-unit-files | grep -q "^systemd-timesyncd.service"; then
+    # systemd-timesyncd (modern default)
+    sudo systemctl stop systemd-timesyncd 2>/dev/null || true
+    sudo timedatectl set-ntp true
+    sudo systemctl start systemd-timesyncd 2>/dev/null || true
+    sudo systemctl enable systemd-timesyncd 2>/dev/null || true
+    # Force sync
+    sudo timedatectl set-time "$(date -u +%Y-%m-%d\ %H:%M:%S)" 2>/dev/null || true
+elif command -v chronyd &> /dev/null; then
+    # Chrony
+    sudo systemctl stop chronyd 2>/dev/null || true
+    sudo chronyd -q 2>/dev/null || true
+    sudo systemctl start chronyd 2>/dev/null || true
+    sudo systemctl enable chronyd 2>/dev/null || true
+else
+    # Fallback: try to install and use ntpdate
+    echo "No time sync service found, installing NTP..."
+    sudo apt-get install -y ntp ntpdate || true
+    if command -v ntpdate &> /dev/null; then
+        sudo ntpdate -s time.nist.gov || sudo ntpdate -s pool.ntp.org || true
+    fi
+    if systemctl list-unit-files | grep -q "^ntp.service"; then
+        sudo systemctl start ntp 2>/dev/null || true
+        sudo systemctl enable ntp 2>/dev/null || true
+    fi
+fi
+
+# Verify time sync is working
+echo "Time sync configured. Current time: $(date)"
 
 # Create application directory
 APP_DIR="/opt/piview"
@@ -464,8 +498,9 @@ sudo apt-get install -y \
     rpi-update || true
 
 # Configure .xinitrc with aggressive screen blanking prevention
-echo "Configuring X server with bulletproof screen settings..."
-cat > ~/.xinitrc << 'XINITEOF'
+if [ "$NEED_X_SERVER" = true ]; then
+    echo "Configuring X server with bulletproof screen settings..."
+    cat > ~/.xinitrc << 'XINITEOF'
 #!/bin/sh
 # Start Piview - Factory Hardened
 
