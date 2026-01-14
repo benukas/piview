@@ -1,6 +1,12 @@
 # Piview Quick Start Guide
 
-## Installation (One Command)
+## Installation (One Line)
+
+```bash
+curl -sSL https://raw.githubusercontent.com/benukas/piview/main/install.sh | bash
+```
+
+Or if you have the files locally:
 
 ```bash
 chmod +x setup.sh && ./setup.sh
