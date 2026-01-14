@@ -2,7 +2,8 @@
 # Piview - One-shot setup script for Raspberry Pi OS Lite
 # Sets up kiosk mode with read-only SD card, NTP sync, and auto-start
 
-set -e
+# Don't exit on error for prompts - use set -e carefully
+set +e  # Allow commands to fail for better error handling
 
 echo "=========================================="
 echo "Piview - Pi OS Lite Setup"
