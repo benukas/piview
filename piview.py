@@ -608,46 +608,6 @@ class Piview:
             self.log(f"Error opening browser: {e}", 'error')
             return False
     
-    def dismiss_ssl_warnings(self):
-        """Try to automatically dismiss SSL certificate warnings"""
-        try:
-            # Wait a moment for page to load
-            time.sleep(1)
-            
-            # Try to click "Advanced" or "Proceed" buttons
-            # These are common patterns in Chromium SSL error pages
-            subprocess.run(
-                ["xdotool", "key", "Tab", "Tab", "Tab", "Return"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=2
-            )
-            
-            # Alternative: Try typing the URL again to force reload
-            time.sleep(1)
-            subprocess.run(
-                ["xdotool", "key", "ctrl+l"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=1
-            )
-            time.sleep(0.5)
-            subprocess.run(
-                ["xdotool", "type", self.config.get("url", "")],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=2
-            )
-            time.sleep(0.5)
-            subprocess.run(
-                ["xdotool", "key", "Return"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=1
-            )
-        except Exception as e:
-            # Silently fail - SSL flags should handle most cases
-            pass
     
     def keyboard_listener(self):
         """Listen for keyboard input to close browser - works in kiosk mode"""

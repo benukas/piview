@@ -348,7 +348,10 @@ sudo tee $CONFIG_DIR/config.json > /dev/null << EOF
     "--ignore-ssl-errors",
     "--ignore-certificate-errors-spki-list",
     "--allow-running-insecure-content",
-    "--test-type"
+    "--disable-web-security",
+    "--test-type",
+    "--unsafely-treat-insecure-origin-as-secure",
+    "--allow-insecure-localhost"
   ]
 }
 EOF
