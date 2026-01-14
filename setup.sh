@@ -42,13 +42,13 @@ echo "=========================================="
 echo ""
 if [ "$IS_VIRTUALBOX" = true ]; then
     echo "Skipping WiFi configuration (VirtualBox uses host network)"
-    read -p "Configure WiFi anyway? (y/n) " -n 1 -r
-    echo
-    CONFIGURE_WIFI=$REPLY
+    echo -n "Configure WiFi anyway? (y/n) [default: n]: "
+    read -n 1 CONFIGURE_WIFI
+    echo ""
 else
-    read -p "Configure WiFi? (y/n) " -n 1 -r
-    echo
-    CONFIGURE_WIFI=$REPLY
+    echo -n "Configure WiFi? (y/n) [default: n]: "
+    read -n 1 CONFIGURE_WIFI
+    echo ""
 fi
 
 if [[ $CONFIGURE_WIFI =~ ^[Yy]$ ]]; then
@@ -59,23 +59,26 @@ if [[ $CONFIGURE_WIFI =~ ^[Yy]$ ]]; then
     
     # Get WiFi SSID
     echo ""
-    read -p "Enter WiFi SSID (network name): " WIFI_SSID
+    echo -n "Enter WiFi SSID (network name): "
+    read WIFI_SSID
     if [ -z "$WIFI_SSID" ]; then
         echo "No SSID provided, skipping WiFi configuration."
     else
         # Ask if password protected
         echo ""
-        read -p "Is this network password protected? (WPA2) (y/n) " -n 1 -r
-        echo
+        echo -n "Is this network password protected? (WPA2) (y/n): "
+        read -n 1 WIFI_PASS_REPLY
+        echo ""
         
         # Backup existing wpa_supplicant.conf
         if [ -f /etc/wpa_supplicant/wpa_supplicant.conf ]; then
             sudo cp /etc/wpa_supplicant/wpa_supplicant.conf /etc/wpa_supplicant/wpa_supplicant.conf.backup
         fi
         
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
+        if [[ $WIFI_PASS_REPLY =~ ^[Yy]$ ]]; then
             # WPA2 network - get password
-            read -sp "Enter WiFi password: " WIFI_PASSWORD
+            echo -n "Enter WiFi password: "
+            read -s WIFI_PASSWORD
             echo ""
             
             # Generate PSK if wpa_passphrase is available
@@ -89,7 +92,8 @@ if [[ $CONFIGURE_WIFI =~ ^[Yy]$ ]]; then
             
             # Ask for country code (required for WiFi on Pi)
             echo ""
-            read -p "Enter country code (e.g., US, GB, DE) [default: US]: " COUNTRY_CODE
+            echo -n "Enter country code (e.g., US, GB, DE) [default: US]: "
+            read COUNTRY_CODE
             COUNTRY_CODE=${COUNTRY_CODE:-US}
             
             # Configure wpa_supplicant.conf
@@ -108,7 +112,8 @@ WPAEOF
         else
             # Open network (no password)
             echo ""
-            read -p "Enter country code (e.g., US, GB, DE) [default: US]: " COUNTRY_CODE
+            echo -n "Enter country code (e.g., US, GB, DE) [default: US]: "
+            read COUNTRY_CODE
             COUNTRY_CODE=${COUNTRY_CODE:-US}
             
             echo "Configuring WiFi (open network)..."
@@ -270,23 +275,35 @@ sudo chmod +x $APP_DIR/piview.py
 CONFIG_DIR="/etc/piview"
 sudo mkdir -p $CONFIG_DIR
 
-# Get URL from user or use default
+# Configuration prompts
 echo ""
-read -p "Enter the URL to display (or press Enter for default): " USER_URL
-USER_URL=${USER_URL:-"https://example.com"}
+echo "=========================================="
+echo "Configuration"
+echo "=========================================="
+echo ""
 
-read -p "Enter refresh interval in seconds (default: 60): " REFRESH_INTERVAL
+# Get URL from user or use default
+echo -n "Enter the URL to display (or press Enter for default): "
+read USER_URL
+USER_URL=${USER_URL:-"https://example.com"}
+echo ""
+
+# Get refresh interval
+echo -n "Enter refresh interval in seconds (default: 60): "
+read REFRESH_INTERVAL
 REFRESH_INTERVAL=${REFRESH_INTERVAL:-60}
+echo ""
 
 # Ask about SSL certificate handling
+echo -n "Ignore SSL certificate errors? (recommended for factory/internal networks) (y/n) [default: y]: "
+read -n 1 SSL_REPLY
 echo ""
-read -p "Ignore SSL certificate errors? (recommended for factory/internal networks) (y/n) " -n 1 -r
-echo
-if [[ $REPLY =~ ^[Yy]$ ]] || [ -z "$REPLY" ]; then
+if [[ $SSL_REPLY =~ ^[Yy]$ ]] || [ -z "$SSL_REPLY" ]; then
     IGNORE_SSL="true"
 else
     IGNORE_SSL="false"
 fi
+echo ""
 
 # Create config file
 echo "Creating configuration..."
