@@ -1,6 +1,7 @@
 #!/bin/bash
 # Piview - One-line installer
 # Usage: curl -sSL https://raw.githubusercontent.com/benukas/piview/main/install.sh | bash
+# OR: bash <(curl -sSL https://raw.githubusercontent.com/benukas/piview/main/install.sh)
 
 set -e
 
@@ -21,13 +22,15 @@ if [ "$EUID" -eq 0 ]; then
    exit 1
 fi
 
-# Create temporary directory
-TMP_DIR=$(mktemp -d)
+# Create temporary directory in home to persist if needed
+TMP_DIR="$HOME/piview-install-$$"
+mkdir -p "$TMP_DIR"
 cd "$TMP_DIR"
 
 echo "Downloading Piview..."
 # Download the repository files
-curl -sSL https://github.com/benukas/piview/archive/refs/heads/main.tar.gz | tar -xz
+curl -sSL https://github.com/benukas/piview/archive/refs/heads/main.tar.gz -o piview.tar.gz
+tar -xzf piview.tar.gz
 cd piview-main
 
 # Make scripts executable
@@ -46,13 +49,12 @@ echo "  - Refresh interval"
 echo "  - SSL certificate handling"
 echo "  - Read-only mode (optional)"
 echo ""
-if [ -t 0 ]; then
-    read -p "Press Enter to continue with setup..." </dev/tty
-    echo ""
-fi
-./setup.sh
 
-# Cleanup
+# Force interactive mode - run setup.sh directly (not piped)
+# This ensures prompts work properly
+exec bash ./setup.sh
+
+# Cleanup (only reached if setup.sh exits without exec)
 cd /
 rm -rf "$TMP_DIR"
 

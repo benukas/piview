@@ -42,21 +42,13 @@ echo "=========================================="
 echo ""
 if [ "$IS_VIRTUALBOX" = true ]; then
     echo "Skipping WiFi configuration (VirtualBox uses host network)"
-    if [ -t 0 ]; then
-        echo -n "Configure WiFi anyway? (y/n) [default: n]: "
-        read -n 1 CONFIGURE_WIFI </dev/tty
-        echo ""
-    else
-        CONFIGURE_WIFI="n"
-    fi
+    echo -n "Configure WiFi anyway? (y/n) [default: n]: "
+    read -n 1 CONFIGURE_WIFI
+    echo ""
 else
-    if [ -t 0 ]; then
-        echo -n "Configure WiFi? (y/n) [default: n]: "
-        read -n 1 CONFIGURE_WIFI </dev/tty
-        echo ""
-    else
-        CONFIGURE_WIFI="n"
-    fi
+    echo -n "Configure WiFi? (y/n) [default: n]: "
+    read -n 1 CONFIGURE_WIFI
+    echo ""
 fi
 
 if [[ $CONFIGURE_WIFI =~ ^[Yy]$ ]]; then
@@ -67,24 +59,16 @@ if [[ $CONFIGURE_WIFI =~ ^[Yy]$ ]]; then
     
     # Get WiFi SSID
     echo ""
-    if [ -t 0 ]; then
-        echo -n "Enter WiFi SSID (network name): "
-        read WIFI_SSID </dev/tty
-    else
-        WIFI_SSID=""
-    fi
+    echo -n "Enter WiFi SSID (network name): "
+    read WIFI_SSID
     if [ -z "$WIFI_SSID" ]; then
         echo "No SSID provided, skipping WiFi configuration."
     else
         # Ask if password protected
         echo ""
-        if [ -t 0 ]; then
-            echo -n "Is this network password protected? (WPA2) (y/n): "
-            read -n 1 WIFI_PASS_REPLY </dev/tty
-            echo ""
-        else
-            WIFI_PASS_REPLY="y"
-        fi
+        echo -n "Is this network password protected? (WPA2) (y/n): "
+        read -n 1 WIFI_PASS_REPLY
+        echo ""
         
         # Backup existing wpa_supplicant.conf
         if [ -f /etc/wpa_supplicant/wpa_supplicant.conf ]; then
@@ -93,13 +77,9 @@ if [[ $CONFIGURE_WIFI =~ ^[Yy]$ ]]; then
         
         if [[ $WIFI_PASS_REPLY =~ ^[Yy]$ ]]; then
             # WPA2 network - get password
-            if [ -t 0 ]; then
-                echo -n "Enter WiFi password: "
-                read -s WIFI_PASSWORD </dev/tty
-                echo ""
-            else
-                WIFI_PASSWORD=""
-            fi
+            echo -n "Enter WiFi password: "
+            read -s WIFI_PASSWORD
+            echo ""
             
             # Generate PSK if wpa_passphrase is available
             if command -v wpa_passphrase &> /dev/null; then
@@ -112,12 +92,8 @@ if [[ $CONFIGURE_WIFI =~ ^[Yy]$ ]]; then
             
             # Ask for country code (required for WiFi on Pi)
             echo ""
-            if [ -t 0 ]; then
-                echo -n "Enter country code (e.g., US, GB, DE) [default: US]: "
-                read COUNTRY_CODE </dev/tty
-            else
-                COUNTRY_CODE="US"
-            fi
+            echo -n "Enter country code (e.g., US, GB, DE) [default: US]: "
+            read COUNTRY_CODE
             COUNTRY_CODE=${COUNTRY_CODE:-US}
             
             # Configure wpa_supplicant.conf
@@ -136,12 +112,8 @@ WPAEOF
         else
             # Open network (no password)
             echo ""
-            if [ -t 0 ]; then
-                echo -n "Enter country code (e.g., US, GB, DE) [default: US]: "
-                read COUNTRY_CODE </dev/tty
-            else
-                COUNTRY_CODE="US"
-            fi
+            echo -n "Enter country code (e.g., US, GB, DE) [default: US]: "
+            read COUNTRY_CODE
             COUNTRY_CODE=${COUNTRY_CODE:-US}
             
             echo "Configuring WiFi (open network)..."
@@ -310,38 +282,29 @@ echo "Configuration"
 echo "=========================================="
 echo ""
 
-# Check if we're in an interactive terminal
-if [ ! -t 0 ]; then
-    echo "Warning: Not running in interactive terminal."
-    echo "Using defaults. You can edit /etc/piview/config.json later."
-    echo ""
-    USER_URL="https://example.com"
-    REFRESH_INTERVAL=60
+# Always prompt - force interactive mode
+# Get URL from user or use default
+echo -n "Enter the URL to display (or press Enter for default): "
+read USER_URL
+USER_URL=${USER_URL:-"https://example.com"}
+echo ""
+
+# Get refresh interval
+echo -n "Enter refresh interval in seconds (default: 60): "
+read REFRESH_INTERVAL
+REFRESH_INTERVAL=${REFRESH_INTERVAL:-60}
+echo ""
+
+# Ask about SSL certificate handling
+echo -n "Ignore SSL certificate errors? (recommended for factory/internal networks) (y/n) [default: y]: "
+read -n 1 SSL_REPLY
+echo ""
+if [[ $SSL_REPLY =~ ^[Yy]$ ]] || [ -z "$SSL_REPLY" ]; then
     IGNORE_SSL="true"
 else
-    # Get URL from user or use default
-    echo -n "Enter the URL to display (or press Enter for default): "
-    read USER_URL </dev/tty
-    USER_URL=${USER_URL:-"https://example.com"}
-    echo ""
-    
-    # Get refresh interval
-    echo -n "Enter refresh interval in seconds (default: 60): "
-    read REFRESH_INTERVAL </dev/tty
-    REFRESH_INTERVAL=${REFRESH_INTERVAL:-60}
-    echo ""
-    
-    # Ask about SSL certificate handling
-    echo -n "Ignore SSL certificate errors? (recommended for factory/internal networks) (y/n) [default: y]: "
-    read -n 1 SSL_REPLY </dev/tty
-    echo ""
-    if [[ $SSL_REPLY =~ ^[Yy]$ ]] || [ -z "$SSL_REPLY" ]; then
-        IGNORE_SSL="true"
-    else
-        IGNORE_SSL="false"
-    fi
-    echo ""
+    IGNORE_SSL="false"
 fi
+echo ""
 
 # Create config file
 echo "Creating configuration..."
@@ -564,15 +527,11 @@ OVEREOF
 sudo chmod +x /usr/local/bin/overlayroot.sh
 
 echo ""
-if [ -t 0 ]; then
-    echo -n "Enable read-only mode for SD card now? (recommended for factory use) (y/n) [default: n]: "
-    read -n 1 READONLY_REPLY </dev/tty
-    echo ""
-    if [[ $READONLY_REPLY =~ ^[Yy]$ ]]; then
-        sudo /usr/local/bin/overlayroot.sh enable
-    fi
-else
-    echo "Skipping read-only mode (non-interactive mode)"
+echo -n "Enable read-only mode for SD card now? (recommended for factory use) (y/n) [default: n]: "
+read -n 1 READONLY_REPLY
+echo ""
+if [[ $READONLY_REPLY =~ ^[Yy]$ ]]; then
+    sudo /usr/local/bin/overlayroot.sh enable
 fi
 
 # Install additional tools for screen management
