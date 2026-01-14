@@ -238,6 +238,9 @@ else
     sudo apt-get install -y $PACKAGES || true
 fi
 
+# Install certificate tools (for SSL certificate installation)
+sudo apt-get install -y ca-certificates libnss3-tools || true
+
 # Final verification - browser should be available
 if ! command -v chromium-browser >/dev/null 2>&1 && ! command -v chromium >/dev/null 2>&1; then
     echo "Warning: Chromium browser executable not found in PATH"
@@ -371,6 +374,7 @@ sudo tee $CONFIG_DIR/config.json > /dev/null << EOF
   "refresh_interval": $REFRESH_INTERVAL,
   "browser": "chromium-browser",
   "ignore_ssl_errors": $IGNORE_SSL,
+  "cert_installed": ${CERT_INSTALLED:-false},
   "connection_retry_delay": 5,
   "max_connection_retries": 3,
   "kiosk_flags": [
