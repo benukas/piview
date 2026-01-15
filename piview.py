@@ -927,6 +927,29 @@ class Piview:
             self.prevent_screen_blanking()
             time.sleep(1)
         
+        # Network recovery loop - don't proceed until network is good
+        network_ready = False
+        network_attempts = 0
+        while not network_ready and self.running:
+            if self.check_url_connectivity(url):
+                network_ready = True
+                self.log("Network connectivity verified")
+            else:
+                network_attempts += 1
+                self.log(f"Waiting for network... (attempt {network_attempts})", 'warning')
+                time.sleep(10)
+                
+                # After 6 attempts (1 min), check DNS explicitly
+                if network_attempts % 6 == 0:
+                    try:
+                        from urllib.parse import urlparse
+                        import socket
+                        hostname = urlparse(url).hostname
+                        socket.gethostbyname(hostname)
+                        self.log(f"DNS works for {hostname}, but connection failing", 'warning')
+                    except Exception as e:
+                        self.log(f"DNS still failing: {e}", 'error')
+        
         # Log browser control info
         self.log("Browser controls: Press Alt+F4 to close browser, or use /opt/piview/close_browser.sh")
         self.log("Or restart service: sudo systemctl restart piview.service")
