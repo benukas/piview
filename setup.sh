@@ -674,6 +674,42 @@ echo "Installing utility scripts..."
 sudo cp close_browser.sh $APP_DIR/ 2>/dev/null || true
 sudo cp screen_keepalive.sh $APP_DIR/ 2>/dev/null || true
 sudo cp export_logs.sh $APP_DIR/ 2>/dev/null || true
+
+# Create factory helper scripts
+echo "Creating factory helper scripts..."
+sudo tee $APP_DIR/restart.sh > /dev/null << 'EOF'
+#!/bin/bash
+# Quick restart script
+sudo systemctl restart piview.service
+echo "Piview restarted"
+EOF
+
+sudo tee $APP_DIR/stop.sh > /dev/null << 'EOF'
+#!/bin/bash
+# Stop script
+sudo systemctl stop piview.service
+pkill -9 chromium 2>/dev/null || true
+pkill -9 chromium-browser 2>/dev/null || true
+echo "Piview stopped"
+EOF
+
+sudo tee $APP_DIR/status.sh > /dev/null << 'EOF'
+#!/bin/bash
+# Status check script
+echo "=== Service Status ==="
+sudo systemctl status piview.service --no-pager -l
+echo ""
+echo "=== Health Status ==="
+if [ -f /tmp/piview_health.json ]; then
+    cat /tmp/piview_health.json | python3 -m json.tool 2>/dev/null || cat /tmp/piview_health.json
+else
+    echo "Health file not found (service may not be running)"
+fi
+echo ""
+echo "=== Recent Logs ==="
+sudo journalctl -u piview.service -n 20 --no-pager
+EOF
+
 sudo chmod +x $APP_DIR/*.sh 2>/dev/null || true
 
 # Create symlink for easy access to export logs
