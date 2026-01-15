@@ -485,18 +485,24 @@ else
 fi
 
 if [ "$NEED_X_SERVER" = true ]; then
-    PACKAGES="xserver-xorg xinit x11-xserver-utils xdotool unclutter python3 python3-pip watchdog"
+    PACKAGES="xserver-xorg xinit x11-xserver-utils xdotool unclutter python3 python3-pip python3-psutil watchdog"
     if [ -n "$BROWSER_PKG" ]; then
         PACKAGES="$BROWSER_PKG $PACKAGES"
     fi
     sudo apt-get install -y $PACKAGES || true
 else
     # Desktop already has X server, just install browser and tools
-    PACKAGES="xdotool unclutter python3 python3-pip watchdog"
+    PACKAGES="xdotool unclutter python3 python3-pip python3-psutil watchdog"
     if [ -n "$BROWSER_PKG" ]; then
         PACKAGES="$BROWSER_PKG $PACKAGES"
     fi
     sudo apt-get install -y $PACKAGES || true
+fi
+
+# Install psutil via pip if apt package not available (fallback)
+if ! python3 -c "import psutil" 2>/dev/null; then
+    echo "Installing psutil via pip..."
+    sudo pip3 install psutil || true
 fi
 
 # Install certificate tools (for SSL certificate installation)

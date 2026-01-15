@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Piview - Bulletproof Kiosk Mode for Pi OS Lite
-Factory-hardened with aggressive screen blanking prevention and auto-recovery
+Piview - FACTORY-HARDENED Edition
+Designed for 24/7 industrial deployment with zero-touch operation
 """
 
 import json
@@ -14,165 +14,144 @@ import threading
 import logging
 import urllib.request
 import ssl
+import shutil
+import psutil
 from pathlib import Path
 from datetime import datetime
 
-# Configuration file path
 CONFIG_FILE = Path("/etc/piview/config.json")
 USER_CONFIG_FILE = Path.home() / ".piview" / "config.json"
 LOG_FILE = Path("/var/log/piview.log")
+HEALTH_FILE = Path("/tmp/piview_health.json")
 
 DEFAULT_CONFIG = {
     "url": "http://example.com",
-    "refresh_interval": 60,  # seconds
+    "refresh_interval": 60,
     "browser": "chromium-browser",
-    "health_check_interval": 10,  # seconds between health checks
-    "max_browser_restarts": 10,  # max restarts before giving up
-    "ignore_ssl_errors": True,  # Ignore SSL certificate errors (for self-signed certs)
-    "connection_retry_delay": 5,  # seconds to wait before retrying connection
-    "max_connection_retries": 3,  # max retries for connection failures
+    "health_check_interval": 10,
+    "max_browser_restarts": 10,
+    "ignore_ssl_errors": True,
+    "connection_retry_delay": 5,
+    "max_connection_retries": 3,
+    "watchdog_freeze_threshold": 120,  # seconds
+    "watchdog_enabled": True,
+    "auto_reboot_enabled": True,
+    "auto_reboot_after_failures": 20,  # reboot after this many consecutive failures
+    "memory_limit_mb": 1500,  # restart browser if memory exceeds this
+    "disk_space_warning_mb": 500,  # warn if disk space below this
+    "log_rotation_size_mb": 10,
+    "health_endpoint_port": 8888,  # HTTP endpoint for external monitoring
     "kiosk_flags": [
         "--kiosk",
         "--noerrdialogs",
         "--disable-infobars",
         "--disable-session-crashed-bubble",
-        "--disable-restore-session-state",
-        "--disable-sync",
-        "--disable-dev-shm-usage",
         "--no-sandbox",
-        "--disable-gpu",
-        "--user-data-dir=/tmp/chromium-ssl-bypass"
+        "--disable-dev-shm-usage",
+        "--disable-gpu",  # Safer for factory environments
+        "--user-data-dir=/tmp/chromium-piview"
     ]
 }
 
-class Piview:
+class FactoryPiview:
     def __init__(self):
-        # Initialize logger FIRST - before anything else that might use it
         self.logger = None
-        
         self.running = True
         self.browser_process = None
         self.browser_restart_count = 0
-        self.browser_launch_time = 0  # Track when browser was launched (for ignoring early exits)
-        self.last_browser_check = time.time()
-        self.last_screen_keepalive = time.time()
-        self.last_health_check = time.time()
-        self.connection_failures = 0
-        self.last_url_check = 0
-        self.consecutive_network_failures = 0
-        self.network_failover_triggered = False
+        self.browser_launch_time = 0
+        self.consecutive_failures = 0
+        self.total_uptime_start = time.time()
+        self.last_successful_load = 0
+        self.system_reboots = 0
         
-        # Setup X server environment EARLY (before logging, so it's available)
+        # Monitoring metrics
+        self.metrics = {
+            "browser_restarts": 0,
+            "network_failures": 0,
+            "memory_warnings": 0,
+            "disk_warnings": 0,
+            "last_health_check": 0,
+            "uptime_seconds": 0,
+            "last_error": None
+        }
+        
         self.setup_x_environment()
-        
-        # Setup logging (must be early)
         self.setup_logging()
-        
-        # Load config after logging is ready
         self.config = self.load_config()
         
-        # Setup signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
         
-        
-        # Initialize screen blanking prevention
         self.prevent_screen_blanking()
-        
-        # Start background threads
         self.start_background_threads()
+        
+        # Write initial health status
+        self.write_health_status()
     
     def setup_x_environment(self):
-        """Setup X server environment variables early"""
-        # Set DISPLAY
+        """Setup X server environment with fallbacks"""
         display = os.environ.get('DISPLAY', ':0')
         os.environ['DISPLAY'] = display
         
-        # Set XAUTHORITY if not already set
         if 'XAUTHORITY' not in os.environ:
-            # Try to get actual user (not just from env)
             try:
                 import pwd
                 username = pwd.getpwuid(os.getuid()).pw_name
             except Exception:
-                username = os.environ.get('USER', os.environ.get('USERNAME', 'pi'))
+                username = os.environ.get('USER', 'pi')
             
             xauth_paths = [
                 f"/home/{username}/.Xauthority",
                 os.path.expanduser("~/.Xauthority"),
-                f"/root/.Xauthority"
+                "/root/.Xauthority"
             ]
             
             for xauth_path in xauth_paths:
                 if os.path.exists(xauth_path):
                     os.environ['XAUTHORITY'] = xauth_path
                     break
-            else:
-                # If not found, try to create it or use xauth to generate
-                try:
-                    # Try to get XAUTHORITY from xauth
-                    result = subprocess.run(
-                        ["xauth", "list"],
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.DEVNULL,
-                        timeout=2,
-                        env=dict(os.environ, DISPLAY=display)
-                    )
-                    if result.returncode == 0:
-                        # Xauth works, use default location
-                        default_xauth = os.path.expanduser("~/.Xauthority")
-                        os.environ['XAUTHORITY'] = default_xauth
-                except Exception:
-                    pass
     
     def setup_logging(self):
-        """Setup logging to file and console"""
-        # Always initialize logger to None first
+        """Setup logging with rotation"""
         self.logger = None
-        
         try:
-            # Ensure log directory exists
-            try:
-                LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-            except Exception as e:
-                # Can't create directory, use fallback
-                print(f"Warning: Could not create log directory: {e}", file=sys.stderr)
-                return
+            LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
             
-            # Try to set up file logging
-            try:
-                file_handler = logging.FileHandler(LOG_FILE)
-                file_handler.setLevel(logging.INFO)
-                file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-            except Exception as e:
-                # Can't create file handler, continue with console only
-                print(f"Warning: Could not create log file: {e}", file=sys.stderr)
-                file_handler = None
+            # Rotate log if too large
+            if LOG_FILE.exists():
+                size_mb = LOG_FILE.stat().st_size / (1024 * 1024)
+                max_size = self.config.get("log_rotation_size_mb", 10) if hasattr(self, 'config') else 10
+                if size_mb > max_size:
+                    backup = LOG_FILE.with_suffix('.log.old')
+                    if backup.exists():
+                        backup.unlink()
+                    LOG_FILE.rename(backup)
             
-            # Set up console handler
+            file_handler = logging.FileHandler(LOG_FILE)
+            file_handler.setLevel(logging.INFO)
+            file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+            
             console_handler = logging.StreamHandler(sys.stdout)
             console_handler.setLevel(logging.INFO)
             console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
             
-            # Configure logger
             self.logger = logging.getLogger(__name__)
             self.logger.setLevel(logging.INFO)
-            self.logger.handlers.clear()  # Clear any existing handlers
-            
-            if file_handler:
-                self.logger.addHandler(file_handler)
+            self.logger.handlers.clear()
+            self.logger.addHandler(file_handler)
             self.logger.addHandler(console_handler)
             
         except Exception as e:
-            # Complete fallback - just use print
-            print(f"Warning: Logging setup failed: {e}", file=sys.stderr)
+            print(f"Logging setup failed: {e}", file=sys.stderr)
             self.logger = None
     
     def log(self, message, level='info'):
-        """Log a message"""
+        """Log with metrics update"""
         if self.logger:
             if level == 'error':
                 self.logger.error(message)
+                self.metrics["last_error"] = f"{datetime.now()}: {message}"
             elif level == 'warning':
                 self.logger.warning(message)
             else:
@@ -180,18 +159,233 @@ class Piview:
         else:
             print(f"[{datetime.now()}] {message}")
     
-    def signal_handler(self, signum, frame):
-        """Handle shutdown signals gracefully"""
-        self.log("Shutting down Piview...")
-        self.running = False
-        self.close_browser()
-        sys.exit(0)
+    def write_health_status(self):
+        """Write health status for external monitoring"""
+        try:
+            self.metrics["uptime_seconds"] = int(time.time() - self.total_uptime_start)
+            self.metrics["last_health_check"] = time.time()
+            
+            health = {
+                "status": "healthy" if self.consecutive_failures < 5 else "degraded",
+                "browser_running": self.browser_process is not None and self.browser_process.poll() is None,
+                "metrics": self.metrics,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            with open(HEALTH_FILE, 'w') as f:
+                json.dump(health, f, indent=2)
+        except Exception:
+            pass
+    
+    def check_system_resources(self):
+        """Monitor system resources and take action"""
+        try:
+            # Memory check
+            if self.browser_process:
+                try:
+                    process = psutil.Process(self.browser_process.pid)
+                    memory_mb = process.memory_info().rss / (1024 * 1024)
+                    
+                    limit = self.config.get("memory_limit_mb", 1500)
+                    if memory_mb > limit:
+                        self.log(f"Browser memory {memory_mb:.0f}MB exceeds limit {limit}MB - restarting", 'warning')
+                        self.metrics["memory_warnings"] += 1
+                        self.restart_browser()
+                        return
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+            
+            # Disk space check
+            disk = shutil.disk_usage("/")
+            free_mb = disk.free / (1024 * 1024)
+            warning_threshold = self.config.get("disk_space_warning_mb", 500)
+            
+            if free_mb < warning_threshold:
+                self.log(f"Low disk space: {free_mb:.0f}MB free", 'warning')
+                self.metrics["disk_warnings"] += 1
+                # Clean up old logs
+                self.cleanup_old_files()
+                
+        except Exception as e:
+            self.log(f"Resource check error: {e}", 'warning')
+    
+    def cleanup_old_files(self):
+        """Clean up temp files and old logs"""
+        try:
+            # Clean chromium cache
+            cache_dir = Path("/tmp/chromium-piview")
+            if cache_dir.exists():
+                shutil.rmtree(cache_dir, ignore_errors=True)
+                self.log("Cleaned browser cache")
+            
+            # Keep only last 2 log files
+            log_dir = LOG_FILE.parent
+            if log_dir.exists():
+                old_logs = sorted(log_dir.glob("*.log.old*"))
+                for old_log in old_logs[2:]:
+                    old_log.unlink()
+                    
+        except Exception as e:
+            self.log(f"Cleanup error: {e}", 'warning')
+    
+    def watchdog_thread(self):
+        """Monitor browser responsiveness - FACTORY HARDENED"""
+        last_activity = time.time()
+        freeze_threshold = self.config.get("watchdog_freeze_threshold", 120)
+        
+        while self.running:
+            time.sleep(15)
+            
+            if not self.config.get("watchdog_enabled", True):
+                continue
+            
+            if not self.browser_process or self.browser_process.poll() is not None:
+                last_activity = time.time()
+                continue
+            
+            try:
+                # Test if browser window exists
+                result = subprocess.run(
+                    ["xdotool", "search", "--class", "chromium"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5
+                )
+                
+                if result.returncode == 0 and result.stdout:
+                    last_activity = time.time()
+                else:
+                    elapsed = time.time() - last_activity
+                    if elapsed > freeze_threshold:
+                        self.log(f"WATCHDOG: Browser frozen for {elapsed:.0f}s - KILLING", 'error')
+                        self.consecutive_failures += 1
+                        try:
+                            self.browser_process.kill()
+                            subprocess.run(["pkill", "-9", "-f", "chromium"], 
+                                         timeout=2, check=False,
+                                         stdout=subprocess.DEVNULL,
+                                         stderr=subprocess.DEVNULL)
+                        except Exception:
+                            pass
+                        last_activity = time.time()
+                        
+            except subprocess.TimeoutExpired:
+                elapsed = time.time() - last_activity
+                if elapsed > freeze_threshold:
+                    self.log("WATCHDOG: System unresponsive - force kill", 'error')
+                    subprocess.run(["pkill", "-9", "-f", "chromium"], 
+                                 timeout=2, check=False,
+                                 stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+                    last_activity = time.time()
+                    self.check_for_emergency_reboot()
+            except Exception as e:
+                self.log(f"Watchdog error: {e}", 'warning')
+    
+    def check_for_emergency_reboot(self):
+        """Reboot system if failures exceed threshold"""
+        if not self.config.get("auto_reboot_enabled", True):
+            return
+        
+        max_failures = self.config.get("auto_reboot_after_failures", 20)
+        if self.consecutive_failures >= max_failures:
+            self.log(f"EMERGENCY: {self.consecutive_failures} consecutive failures - REBOOTING", 'error')
+            self.write_health_status()
+            time.sleep(2)
+            try:
+                subprocess.run(["sudo", "reboot"], timeout=5)
+            except Exception:
+                # Force reboot if sudo fails
+                subprocess.run(["reboot"], timeout=5, check=False)
+    
+    def screen_keepalive_thread(self):
+        """Keep screen alive"""
+        while self.running:
+            try:
+                time.sleep(30)
+                self.keep_screen_alive()
+                self.prevent_screen_blanking()
+            except Exception as e:
+                self.log(f"Screen keepalive error: {e}", 'warning')
+    
+    def health_check_thread(self):
+        """Comprehensive health monitoring"""
+        while self.running:
+            try:
+                time.sleep(self.config.get("health_check_interval", 10))
+                
+                # Check browser process
+                if self.browser_process and self.browser_process.poll() is not None:
+                    elapsed = time.time() - self.browser_launch_time if self.browser_launch_time > 0 else 999
+                    if elapsed >= 15:
+                        self.log("Browser died unexpectedly", 'warning')
+                        self.consecutive_failures += 1
+                        self.restart_browser()
+                
+                # Check system resources
+                self.check_system_resources()
+                
+                # Update health status
+                self.write_health_status()
+                
+                # Check for emergency reboot
+                self.check_for_emergency_reboot()
+                
+            except Exception as e:
+                self.log(f"Health check error: {e}", 'warning')
+    
+    def health_endpoint_thread(self):
+        """HTTP endpoint for external monitoring"""
+        try:
+            from http.server import HTTPServer, BaseHTTPRequestHandler
+            
+            class HealthHandler(BaseHTTPRequestHandler):
+                def do_GET(self_handler):
+                    if self_handler.path == '/health':
+                        try:
+                            with open(HEALTH_FILE, 'r') as f:
+                                health_data = f.read()
+                            
+                            self_handler.send_response(200)
+                            self_handler.send_header('Content-Type', 'application/json')
+                            self_handler.end_headers()
+                            self_handler.wfile.write(health_data.encode())
+                        except Exception:
+                            self_handler.send_response(500)
+                            self_handler.end_headers()
+                    else:
+                        self_handler.send_response(404)
+                        self_handler.end_headers()
+                
+                def log_message(self_handler, format, *args):
+                    pass  # Suppress HTTP logs
+            
+            port = self.config.get("health_endpoint_port", 8888)
+            server = HTTPServer(('0.0.0.0', port), HealthHandler)
+            self.log(f"Health endpoint running on port {port}")
+            server.serve_forever()
+        except Exception as e:
+            self.log(f"Health endpoint error: {e}", 'warning')
+    
+    def start_background_threads(self):
+        """Start all monitoring threads"""
+        try:
+            threading.Thread(target=self.screen_keepalive_thread, daemon=True).start()
+            threading.Thread(target=self.health_check_thread, daemon=True).start()
+            
+            if self.config.get("watchdog_enabled", True):
+                threading.Thread(target=self.watchdog_thread, daemon=True).start()
+                self.log("Watchdog enabled")
+            
+            # Health endpoint for remote monitoring
+            threading.Thread(target=self.health_endpoint_thread, daemon=True).start()
+                
+        except Exception as e:
+            self.log(f"Thread start error: {e}", 'warning')
     
     def prevent_screen_blanking(self):
-        """Prevent screen blanking - user-space layer (kernel handled by systemd service)"""
+        """Prevent screen blanking"""
         try:
-            # User-space layer: xset commands (if X is available)
-            # Kernel layer is handled by disable-screen-blanking.service (consoleblank=0)
             if os.environ.get('DISPLAY'):
                 subprocess.run(
                     ["xset", "s", "off", "-dpms", "s", "noblank"],
@@ -199,27 +393,13 @@ class Piview:
                     stderr=subprocess.DEVNULL,
                     timeout=2
                 )
-            
-            # Note: tvservice is deprecated but kept for compatibility
-            # It will fail gracefully on newer firmware
-            try:
-                subprocess.run(
-                    ["tvservice", "-p"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=2
-                )
-            except Exception:
-                pass  # Expected on newer firmware
-            
-        except Exception as e:
-            self.log(f"Warning: Could not set screen blanking prevention: {e}", 'warning')
+        except Exception:
+            pass
     
     def keep_screen_alive(self):
-        """Periodically send keepalive signals to prevent screen blanking"""
+        """Send keepalive signals"""
         try:
             if os.environ.get('DISPLAY'):
-                # Move mouse slightly (invisible to user)
                 subprocess.run(
                     ["xdotool", "mousemove_relative", "--", "1", "0"],
                     stdout=subprocess.DEVNULL,
@@ -233,140 +413,68 @@ class Piview:
                     stderr=subprocess.DEVNULL,
                     timeout=1
                 )
-                
-                # Re-apply xset settings
-                subprocess.run(
-                    ["xset", "s", "reset"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=1
-                )
         except Exception:
             pass
     
-    def screen_keepalive_thread(self):
-        """Background thread to keep screen alive"""
-        while self.running:
-            try:
-                time.sleep(30)  # Every 30 seconds
-                if time.time() - self.last_screen_keepalive >= 30:
-                    self.keep_screen_alive()
-                    self.prevent_screen_blanking()
-                    self.last_screen_keepalive = time.time()
-            except Exception as e:
-                self.log(f"Screen keepalive error: {e}", 'warning')
-                time.sleep(60)
-    
-    def health_check_thread(self):
-        """Background thread for health monitoring"""
-        while self.running:
-            try:
-                time.sleep(self.config.get("health_check_interval", 10))
-                
-                # Check browser process (but ignore exits during first 15s after launch)
-                if self.browser_process:
-                    if self.browser_process.poll() is not None:
-                        elapsed = time.time() - self.browser_launch_time if self.browser_launch_time > 0 else 999
-                        if elapsed < 15:
-                            self.log(f"Browser exited during startup phase ({elapsed:.1f}s) - ignoring (may be normal)", 'info')
-                        else:
-                            self.log("Browser process died, restarting...", 'warning')
-                            self.restart_browser()
-                
-                # Check X server
-                if os.environ.get('DISPLAY'):
-                    result = subprocess.run(
-                        ["xset", "q"],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        timeout=2
-                    )
-                    if result.returncode != 0:
-                        self.log("X server not responding, may need restart", 'warning')
-                
-                # Check network connectivity (for failover)
-                url = self.config.get("url", "")
-                if url and time.time() - self.last_url_check > 30:  # Check every 30 seconds
-                    if not self.check_url_connectivity(url):
-                        self.consecutive_network_failures += 1
-                        self.log(f"Network connectivity check failed ({self.consecutive_network_failures} consecutive)", 'warning')
-                        
-                        # Trigger failover after 3 consecutive failures
-                        if self.consecutive_network_failures >= 3 and not self.network_failover_triggered:
-                            self.force_network_failover()
-                    else:
-                        self.consecutive_network_failures = 0
-                        if self.network_failover_triggered:
-                            self.log("Network connectivity restored", 'info')
-                            self.network_failover_triggered = False
-                    self.last_url_check = time.time()
-                
-                # Re-apply screen blanking prevention
-                self.prevent_screen_blanking()
-                
-                self.last_health_check = time.time()
-            except Exception as e:
-                self.log(f"Health check error: {e}", 'warning')
-                time.sleep(30)
-    
-    def watchdog_thread(self):
-        """Kill frozen browser if it stops responding"""
-        last_activity = time.time()
-        frozen_threshold = 120  # 2 minutes without response = frozen
+    def load_config(self):
+        """Load configuration"""
+        config_file = USER_CONFIG_FILE if USER_CONFIG_FILE.exists() else CONFIG_FILE
         
-        while self.running:
-            time.sleep(15)  # Check every 15 seconds
-            
-            if not self.browser_process or self.browser_process.poll() is not None:
-                last_activity = time.time()
-                continue
-            
-            # Test if browser responds to X commands
+        if not config_file.exists():
+            return DEFAULT_CONFIG.copy()
+        
+        try:
+            with open(config_file, 'r') as f:
+                config = json.load(f)
+                merged = DEFAULT_CONFIG.copy()
+                merged.update(config)
+                return merged
+        except Exception as e:
+            self.log(f"Config load error: {e}", 'warning')
+            return DEFAULT_CONFIG.copy()
+    
+    def signal_handler(self, signum, frame):
+        """Graceful shutdown"""
+        self.log("Shutting down...")
+        self.running = False
+        self.close_browser()
+        sys.exit(0)
+    
+    def close_browser(self):
+        """Aggressively close browser"""
+        if self.browser_process:
             try:
-                result = subprocess.run(
-                    ["xdotool", "search", "--class", "chromium"],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
-                    timeout=5
-                )
-                
-                if result.returncode == 0 and result.stdout:
-                    # Browser window exists and responds
-                    last_activity = time.time()
-                else:
-                    # No window found - might be frozen
-                    elapsed = time.time() - last_activity
-                    if elapsed > frozen_threshold:
-                        self.log(f"Browser frozen for {elapsed:.0f}s - KILLING", 'error')
-                        try:
-                            self.browser_process.kill()
-                            subprocess.run(["pkill", "-9", "-f", "chromium"], 
-                                         timeout=2, check=False,
-                                         stdout=subprocess.DEVNULL,
-                                         stderr=subprocess.DEVNULL)
-                        except Exception:
-                            pass
-                        last_activity = time.time()
-                        
+                self.browser_process.terminate()
+                self.browser_process.wait(timeout=3)
             except subprocess.TimeoutExpired:
-                # xdotool itself timed out - system is struggling
-                elapsed = time.time() - last_activity
-                if elapsed > frozen_threshold:
-                    self.log("System unresponsive - force killing browser", 'error')
-                    subprocess.run(["pkill", "-9", "-f", "chromium"], 
-                                 timeout=2, check=False,
-                                 stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL)
-                    last_activity = time.time()
-            except Exception as e:
-                self.log(f"Watchdog check failed: {e}", 'warning')
+                try:
+                    self.browser_process.kill()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            finally:
+                self.browser_process = None
+        
+        for _ in range(3):
+            try:
+                subprocess.run(
+                    ["pkill", "-9", "-f", "chromium"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=2
+                )
+                time.sleep(0.5)
+            except Exception:
+                pass
     
     def create_error_page(self, error_type, url, details=""):
-        """Create a local HTML error page"""
+        """Create local error page"""
         error_html = f"""<!DOCTYPE html>
 <html>
 <head>
     <title>Connection Error</title>
+    <meta http-equiv="refresh" content="30">
     <style>
         body {{
             font-family: Arial, sans-serif;
@@ -385,16 +493,21 @@ class Piview:
             border-radius: 10px;
             max-width: 600px;
         }}
-        h1 {{ color: #ff6b6b; }}
-        .retry {{ margin-top: 20px; color: #888; }}
+        h1 {{ color: #ff6b6b; margin-bottom: 20px; }}
+        .url {{ color: #4a9eff; word-break: break-all; }}
+        .details {{ color: #ffa500; margin: 20px 0; }}
+        .retry {{ margin-top: 20px; color: #888; font-size: 14px; }}
+        .timestamp {{ color: #666; font-size: 12px; margin-top: 10px; }}
     </style>
 </head>
 <body>
     <div class="error-box">
         <h1>⚠️ {error_type}</h1>
-        <p><strong>URL:</strong> {url}</p>
-        <p>{details}</p>
+        <p><strong>URL:</strong> <span class="url">{url}</span></p>
+        <p class="details">{details}</p>
         <p class="retry">Piview will retry automatically...</p>
+        <p class="retry">Auto-refresh in 30 seconds</p>
+        <p class="timestamp">{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
     </div>
 </body>
 </html>"""
@@ -403,149 +516,45 @@ class Piview:
         error_file.write_text(error_html)
         return f"file://{error_file}"
     
-    def start_background_threads(self):
-        """Start background monitoring threads"""
+    def check_url_connectivity(self, url):
+        """Check URL with DNS verification"""
         try:
-            screen_thread = threading.Thread(target=self.screen_keepalive_thread, daemon=True)
-            screen_thread.start()
+            from urllib.parse import urlparse
+            import socket
             
-            health_thread = threading.Thread(target=self.health_check_thread, daemon=True)
-            health_thread.start()
+            parsed = urlparse(url)
+            hostname = parsed.hostname
             
-            # WATCHDOG - kills frozen browser
-            watchdog = threading.Thread(target=self.watchdog_thread, daemon=True)
-            watchdog.start()
-            self.log("Watchdog enabled (120s freeze threshold)")
+            if not hostname:
+                return False
             
-        except Exception as e:
-            self.log(f"Could not start background threads: {e}", 'warning')
-    
-    def load_config(self):
-        """Load configuration from file"""
-        # Try user config first, then system config, then defaults
-        config_file = USER_CONFIG_FILE if USER_CONFIG_FILE.exists() else CONFIG_FILE
-        
-        if not config_file.exists():
-            # Create user config with defaults
-            if config_file == USER_CONFIG_FILE:
-                config_file.parent.mkdir(parents=True, exist_ok=True)
-                self.save_config(DEFAULT_CONFIG, config_file)
-            return DEFAULT_CONFIG.copy()
-        
-        try:
-            with open(config_file, 'r') as f:
-                config = json.load(f)
-                # Merge with defaults
-                merged = DEFAULT_CONFIG.copy()
-                merged.update(config)
-                return merged
-        except (json.JSONDecodeError, IOError) as e:
-            self.log(f"Error loading config: {e}. Using defaults.", 'warning')
-            return DEFAULT_CONFIG.copy()
-    
-    def save_config(self, config, config_file=None):
-        """Save configuration to file"""
-        if config_file is None:
-            config_file = USER_CONFIG_FILE if USER_CONFIG_FILE.exists() else CONFIG_FILE
-        
-        config_file.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            with open(config_file, 'w') as f:
-                json.dump(config, f, indent=2)
-        except IOError as e:
-            self.log(f"Error saving config: {e}", 'error')
-    
-    def close_browser(self):
-        """Close the browser aggressively"""
-        if self.browser_process:
+            # DNS check
             try:
-                self.browser_process.terminate()
-                self.browser_process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                try:
-                    self.browser_process.kill()
-                    self.browser_process.wait(timeout=2)
-                except Exception:
-                    pass
-            except Exception as e:
-                self.log(f"Error closing browser: {e}", 'warning')
-            finally:
-                self.browser_process = None
-        
-        # Kill any remaining browser processes aggressively
-        for _ in range(3):
-            try:
-                subprocess.run(
-                    ["pkill", "-9", "-f", self.config["browser"]],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=2
-                )
-                time.sleep(0.5)
-            except Exception:
-                pass
-    
-    def refresh_page(self):
-        """Refresh the current page with connection verification"""
-        if self.browser_process and self.browser_process.poll() is None:
-            try:
-                # Check URL connectivity before refresh
-                url = self.config.get("url", "")
-                if url and time.time() - self.last_url_check > 30:  # Check every 30 seconds
-                    if not self.check_url_connectivity(url):
-                        self.log("URL not reachable, restarting browser...", 'warning')
-                        self.restart_browser()
-                        self.last_url_check = time.time()
-                        return True
-                    self.last_url_check = time.time()
+                ip = socket.gethostbyname(hostname)
+                self.log(f"DNS OK: {hostname} -> {ip}")
+            except socket.gaierror:
+                self.log(f"DNS FAILED for {hostname}", 'error')
+                self.metrics["network_failures"] += 1
+                return False
+            
+            # HTTP check
+            ssl_context = None
+            if self.config.get("ignore_ssl_errors", True):
+                ssl_context = ssl.create_default_context()
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
+            
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=10, context=ssl_context) as response:
+                return response.status in [200, 301, 302, 303, 307, 308]
                 
-                # Try F5 key first
-                subprocess.run(
-                    ["xdotool", "key", "F5"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=2
-                )
-                self.log("Page refreshed via F5")
-                return True
-            except Exception as e:
-                # If xdotool fails, reload the page by restarting browser
-                self.log(f"F5 refresh failed ({e}), restarting browser...", 'warning')
-                self.restart_browser()
-                return True
-        else:
-            # Browser not running, restart it
-            self.restart_browser()
-            return True
-    
-    def restart_browser(self):
-        """Restart the browser with the URL - with retry logic"""
-        max_restarts = self.config.get("max_browser_restarts", 10)
-        
-        if self.browser_restart_count >= max_restarts:
-            self.log(f"Max browser restarts ({max_restarts}) reached. Waiting before retry...", 'error')
-            time.sleep(60)
-            self.browser_restart_count = 0
-        
-        self.close_browser()
-        time.sleep(2)  # Give it time to fully close
-        
-        # Re-apply screen blanking prevention before opening browser
-        self.prevent_screen_blanking()
-        
-        if self.open_url(self.config["url"]):
-            self.browser_restart_count = 0
-            self.log("Browser restarted successfully")
-        else:
-            self.browser_restart_count += 1
-            self.log(f"Browser restart failed (attempt {self.browser_restart_count})", 'warning')
-            time.sleep(5)
+        except Exception:
+            self.metrics["network_failures"] += 1
+            return False
     
     def wait_for_x_server(self, max_wait=30):
-        """Wait for X server to be ready"""
-        display = os.environ.get('DISPLAY', ':0')
-        waited = 0
-        while waited < max_wait:
+        """Wait for X server"""
+        for waited in range(max_wait):
             try:
                 result = subprocess.run(
                     ["xset", "q"],
@@ -554,23 +563,15 @@ class Piview:
                     timeout=2
                 )
                 if result.returncode == 0:
-                    self.log("X server is ready")
                     return True
             except Exception:
                 pass
-            
             time.sleep(1)
-            waited += 1
-            if waited % 5 == 0:
-                self.log(f"Waiting for X server... ({waited}/{max_wait}s)", 'warning')
-        
-        self.log("X server not ready after waiting", 'error')
         return False
     
     def find_browser(self):
-        """Find the browser executable"""
-        browsers = ["chromium-browser", "chromium", "google-chrome", "chrome"]
-        for browser in browsers:
+        """Find browser executable"""
+        for browser in ["chromium-browser", "chromium", "google-chrome"]:
             try:
                 result = subprocess.run(
                     ["which", browser],
@@ -584,253 +585,51 @@ class Piview:
                 continue
         return None
     
-    def fix_chromium_exit_status(self):
-        """Force Chromium to think it exited cleanly - prevents 'Chromium didn't shut down correctly' nag bar"""
-        try:
-            # Find user-data-dir from kiosk flags
-            user_data_dir = None
-            for flag in self.config.get("kiosk_flags", []):
-                if flag.startswith("--user-data-dir="):
-                    user_data_dir = flag.split("=", 1)[1]
-                    break
-            
-            # Default to the standard location if not specified
-            if not user_data_dir:
-                user_data_dir = "/tmp/chromium-ssl-bypass"
-            
-            pref_file = Path(user_data_dir) / "Default" / "Preferences"
-            
-            # Create directory structure if it doesn't exist
-            pref_file.parent.mkdir(parents=True, exist_ok=True)
-            
-            # Read existing preferences or create new
-            prefs = {}
-            if pref_file.exists():
-                try:
-                    with open(pref_file, 'r') as f:
-                        prefs = json.load(f)
-                except (json.JSONDecodeError, IOError):
-                    prefs = {}
-            
-            # Set exit status to clean
-            if "profile" not in prefs:
-                prefs["profile"] = {}
-            prefs["profile"]["exited_cleanly"] = True
-            prefs["profile"]["exit_type"] = "Normal"
-            
-            # Also set in session state if it exists
-            if "session" not in prefs:
-                prefs["session"] = {}
-            prefs["session"]["restore_on_startup"] = 0  # Don't restore sessions
-            
-            # Write back
-            with open(pref_file, 'w') as f:
-                json.dump(prefs, f)
-            
-            self.log("Chromium exit status fixed (exited cleanly)")
-        except Exception as e:
-            # Silently fail - this is a nice-to-have, not critical
-            pass
-    
-    def check_url_connectivity(self, url):
-        """Check if URL is reachable with detailed error reporting"""
-        try:
-            from urllib.parse import urlparse
-            import socket
-            
-            parsed = urlparse(url)
-            hostname = parsed.hostname
-            
-            if not hostname:
-                self.log(f"Invalid URL (no hostname): {url}", 'error')
-                return False
-            
-            # DNS resolution check
-            try:
-                ip = socket.gethostbyname(hostname)
-                self.log(f"DNS OK: {hostname} -> {ip}")
-            except socket.gaierror as e:
-                self.log(f"DNS FAILED for {hostname}: {e}", 'error')
-                return False
-            
-            # Create SSL context
-            if self.config.get("ignore_ssl_errors", True):
-                ssl_context = ssl.create_default_context()
-                ssl_context.check_hostname = False
-                ssl_context.verify_mode = ssl.CERT_NONE
-            else:
-                ssl_context = None
-            
-            # HTTP connectivity check
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            try:
-                with urllib.request.urlopen(req, timeout=10, context=ssl_context) as response:
-                    status = response.status
-                    self.log(f"HTTP OK: Status {status}")
-                    return status in [200, 301, 302, 303, 307, 308]
-            except urllib.error.HTTPError as e:
-                self.log(f"HTTP Error {e.code}", 'warning')
-                return e.code < 500  # 4xx is reachable but error, 5xx is not
-            except Exception as e:
-                self.log(f"Connection failed: {e}", 'error')
-                return False
-                
-        except Exception as e:
-            self.log(f"Connectivity check error: {e}", 'error')
-            return False
-    
-    def find_ethernet_interface(self):
-        """Find the ethernet interface name"""
-        interfaces = ["eth0", "enp1s0", "enx", "enp2s0"]  # Common ethernet names
-        for iface in interfaces:
-            if os.path.exists(f"/sys/class/net/{iface}"):
-                return iface
-        # Try to find any ethernet interface
-        if os.path.exists("/sys/class/net"):
-            for iface in os.listdir("/sys/class/net"):
-                if iface.startswith("eth") or iface.startswith("en"):
-                    # Check if it's not a WiFi interface
-                    if not iface.startswith("wlan") and not iface.startswith("wlp"):
-                        return iface
-        return None
-    
-    def find_wifi_interface(self):
-        """Find the WiFi interface name - prefer configured failover interface"""
-        # Use configured failover interface if available
-        if self.config.get("network_failover_enabled", False):
-            configured_interface = self.config.get("failover_wifi_interface", "")
-            if configured_interface and os.path.exists(f"/sys/class/net/{configured_interface}"):
-                return configured_interface
+    def restart_browser(self):
+        """Restart with failure tracking"""
+        self.metrics["browser_restarts"] += 1
         
-        # Fallback to auto-detection
-        interfaces = ["wlan0", "wlp1s0", "wlp2s0"]  # Common WiFi names
-        for iface in interfaces:
-            if os.path.exists(f"/sys/class/net/{iface}"):
-                return iface
-        # Try to find any WiFi interface
-        if os.path.exists("/sys/class/net"):
-            for iface in os.listdir("/sys/class/net"):
-                if iface.startswith("wlan") or iface.startswith("wlp"):
-                    return iface
-        return None
-    
-    def force_network_failover(self):
-        """
-        If LAN is acting up but technically 'connected', 
-        force it down to trigger the WiFi failover.
-        Only works if network failover is enabled in config.
-        """
-        if not self.config.get("network_failover_enabled", False):
-            self.log("Network failover not enabled in config, skipping", 'warning')
-            return
+        if self.browser_restart_count >= self.config.get("max_browser_restarts", 10):
+            self.log("Max restarts reached, waiting...", 'error')
+            time.sleep(60)
+            self.browser_restart_count = 0
         
-        self.log("Connectivity lost on primary port. Forcing network failover...", 'warning')
-        self.network_failover_triggered = True
+        self.close_browser()
+        time.sleep(2)
+        self.prevent_screen_blanking()
         
-        eth_interface = self.find_ethernet_interface()
-        wifi_interface = self.find_wifi_interface()
-        failover_ssid = self.config.get("failover_wifi_ssid", "")
-        
-        if not eth_interface:
-            self.log("No ethernet interface found, skipping failover", 'warning')
-            return
-        
-        if not wifi_interface:
-            self.log("No WiFi interface found, cannot failover", 'error')
-            return
-        
-        if failover_ssid:
-            self.log(f"Switching to failover WiFi network: {failover_ssid}", 'info')
-        
-        try:
-            # Try NetworkManager first (modern Pi OS)
-            if subprocess.run(["which", "nmcli"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
-                self.log(f"Using NetworkManager to disconnect {eth_interface}...", 'info')
-                subprocess.run(
-                    ["sudo", "nmcli", "device", "disconnect", eth_interface],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=5,
-                    check=False
-                )
-                # Ensure WiFi is connected
-                subprocess.run(
-                    ["sudo", "nmcli", "device", "connect", wifi_interface],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=5,
-                    check=False
-                )
-            else:
-                # Fallback to traditional networking
-                self.log(f"Using traditional networking to bring down {eth_interface}...", 'info')
-                subprocess.run(
-                    ["sudo", "ifdown", eth_interface],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=5,
-                    check=False
-                )
-                # Bring WiFi up
-                subprocess.run(
-                    ["sudo", "ifup", wifi_interface],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=5,
-                    check=False
-                )
-            
-            self.log(f"Network failover triggered: {eth_interface} -> {wifi_interface}", 'warning')
-            self.log("Waiting for WiFi to establish connection...", 'info')
-            time.sleep(5)
-            
-            # Verify WiFi is working
-            if self.check_url_connectivity(self.config.get("url", "")):
-                self.log("WiFi failover successful - connectivity restored", 'info')
-            else:
-                self.log("WiFi failover completed but connectivity not yet restored", 'warning')
-                
-        except Exception as e:
-            self.log(f"Error during network failover: {e}", 'error')
+        if self.open_url(self.config["url"]):
+            self.browser_restart_count = 0
+            self.consecutive_failures = 0
+            self.last_successful_load = time.time()
+        else:
+            self.browser_restart_count += 1
+            self.consecutive_failures += 1
     
     def open_url(self, url):
-        """Open a URL in kiosk mode with proper error handling"""
+        """Open URL with comprehensive error handling"""
         self.close_browser()
         
         if not self.wait_for_x_server():
             return False
         
-        # Verify X server works
-        try:
-            subprocess.run(["xset", "q"], check=True, timeout=2,
-                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception as e:
-            self.log(f"X server not working: {e}", 'error')
-            return False
-        
-        # Find browser
         browser_cmd = self.find_browser()
         if not browser_cmd:
             self.log("No browser found", 'error')
             return False
         
-        # CHECK URL CONNECTIVITY - DON'T PROCEED IF DNS FAILS
-        self.log(f"Checking connectivity to {url}...")
-        url_ok = self.check_url_connectivity(url)
-        
-        if not url_ok:
-            self.log("URL not reachable - showing error page instead", 'error')
-            # Show error page instead of broken URL
-            error_url = self.create_error_page(
-                "DNS Resolution Failed",
+        # Check connectivity - don't proceed if DNS fails
+        if not self.check_url_connectivity(url):
+            self.log("URL not reachable - showing error page", 'error')
+            url = self.create_error_page(
+                "Network Error",
                 url,
-                "Cannot resolve hostname. Check network connection."
+                "DNS resolution failed or host unreachable"
             )
-            url = error_url  # Use error page instead
         
         self.prevent_screen_blanking()
         
-        # SIMPLIFIED FLAGS - minimal, stable set
+        # Minimal, stable flags
         kiosk_flags = [
             "--kiosk",
             "--noerrdialogs",
@@ -838,10 +637,10 @@ class Piview:
             "--disable-session-crashed-bubble",
             "--no-sandbox",
             "--disable-dev-shm-usage",
+            "--disable-gpu",
             "--user-data-dir=/tmp/chromium-piview"
         ]
         
-        # Only add SSL bypass if needed AND certs not installed
         if not self.config.get("cert_installed", False) and \
            self.config.get("ignore_ssl_errors", True):
             kiosk_flags.extend([
@@ -849,16 +648,9 @@ class Piview:
                 "--allow-insecure-localhost"
             ])
         
-        # Note: --disable-web-security removed - causes white screens
-        
-        self.fix_chromium_exit_status()
-        
         cmd = [browser_cmd] + kiosk_flags + [url]
         
         try:
-            self.log(f"Launching: {browser_cmd} with {len(kiosk_flags)} flags")
-            
-            # Launch with clean environment
             env = os.environ.copy()
             env['DISPLAY'] = os.environ.get('DISPLAY', ':0')
             if 'XAUTHORITY' in os.environ:
@@ -871,175 +663,87 @@ class Piview:
                 env=env
             )
             
-            # Check for immediate failure
             time.sleep(2)
             if self.browser_process.poll() is not None:
-                _, stderr = self.browser_process.communicate(timeout=1)
-                error_msg = stderr.decode('utf-8', errors='ignore')[:200] if stderr else "Unknown error"
-                self.log(f"Browser died immediately: {error_msg}", 'error')
                 return False
             
             self.browser_launch_time = time.time()
-            
-            # Wait for browser to stabilize
             time.sleep(5)
             
             if self.browser_process.poll() is None:
                 self.log("Browser launched successfully")
                 return True
-            else:
-                self.log(f"Browser exited with code {self.browser_process.returncode}", 'error')
-                return False
-                
+            return False
+            
         except Exception as e:
             self.log(f"Launch failed: {e}", 'error')
             return False
     
-    
-    
     def run(self):
-        """Main loop - display URL with auto-refresh and monitoring"""
+        """Main loop - FACTORY HARDENED"""
         url = self.config.get("url", "http://example.com")
         refresh_interval = self.config.get("refresh_interval", 60)
         
-        if not url or url == "http://example.com" or url == "https://example.com":
-            self.log("Warning: Using default URL. Please configure your URL.", 'warning')
-            self.log(f"Edit config at: {USER_CONFIG_FILE} or {CONFIG_FILE}", 'warning')
-        
-        self.log("=" * 50)
-        self.log("Piview started - Factory Mode")
+        self.log("=" * 60)
+        self.log("PIVIEW - FACTORY-HARDENED EDITION")
         self.log(f"URL: {url}")
-        self.log(f"Auto-refresh: {refresh_interval} seconds")
-        self.log(f"Health check interval: {self.config.get('health_check_interval', 10)} seconds")
-        self.log("Press Alt+F4 to close browser (will restart automatically)")
-        self.log("Press Ctrl+C to stop Piview")
-        self.log("=" * 50)
+        self.log(f"Watchdog: {'ENABLED' if self.config.get('watchdog_enabled') else 'DISABLED'}")
+        self.log(f"Auto-reboot: {'ENABLED' if self.config.get('auto_reboot_enabled') else 'DISABLED'}")
+        self.log(f"Health status: {HEALTH_FILE}")
+        self.log("=" * 60)
         
-        # Wait for X server to be ready first
-        if not self.wait_for_x_server(max_wait=60):
-            self.log("X server not available. Will keep retrying...", 'error')
-            # Don't exit - keep trying
-        else:
-            self.log("X server is ready")
+        # Wait for network
+        network_attempts = 0
+        while not self.check_url_connectivity(url) and self.running:
+            network_attempts += 1
+            self.log(f"Waiting for network... (attempt {network_attempts})", 'warning')
+            time.sleep(10)
+            if network_attempts >= 30:  # 5 minutes
+                self.log("Network timeout - proceeding anyway", 'error')
+                break
         
-        # Aggressively prevent screen blanking at start
+        # Prevent blanking
         for _ in range(3):
             self.prevent_screen_blanking()
             time.sleep(1)
         
-        # Network recovery loop - don't proceed until network is good
-        network_ready = False
-        network_attempts = 0
-        while not network_ready and self.running:
-            if self.check_url_connectivity(url):
-                network_ready = True
-                self.log("Network connectivity verified")
-            else:
-                network_attempts += 1
-                self.log(f"Waiting for network... (attempt {network_attempts})", 'warning')
-                time.sleep(10)
-                
-                # After 6 attempts (1 min), check DNS explicitly
-                if network_attempts % 6 == 0:
-                    try:
-                        from urllib.parse import urlparse
-                        import socket
-                        hostname = urlparse(url).hostname
-                        socket.gethostbyname(hostname)
-                        self.log(f"DNS works for {hostname}, but connection failing", 'warning')
-                    except Exception as e:
-                        self.log(f"DNS still failing: {e}", 'error')
-        
-        # Log browser control info
-        self.log("Browser controls: Press Alt+F4 to close browser, or use /opt/piview/close_browser.sh")
-        self.log("Or restart service: sudo systemctl restart piview.service")
-        
-        # Open browser with retry - more aggressive
-        max_retries = 10
-        browser_opened = False
-        for attempt in range(max_retries):
+        # Open browser with retries
+        for attempt in range(10):
             if self.open_url(url):
-                browser_opened = True
                 break
-            if attempt < max_retries - 1:
-                wait_time = min(5 + attempt, 15)  # Progressive backoff
-                self.log(f"Failed to open browser, retrying ({attempt + 1}/{max_retries}) in {wait_time}s...", 'warning')
-                time.sleep(wait_time)
-                self.prevent_screen_blanking()
-                # Re-check X server
-                if not self.wait_for_x_server(max_wait=10):
-                    self.log("X server lost, waiting longer...", 'warning')
-                    time.sleep(10)
-            else:
-                self.log("Failed to open browser after all retries. Will keep trying in main loop...", 'error')
+            if attempt < 9:
+                wait = min(5 + attempt, 15)
+                self.log(f"Browser launch failed, retry {attempt+1}/10 in {wait}s", 'warning')
+                time.sleep(wait)
         
-        if not browser_opened:
-            self.log("Browser not opened initially, will retry in main loop", 'warning')
-        
-        # Main loop - refresh periodically and monitor
+        # Main loop
         last_refresh = time.time()
-        consecutive_failures = 0
         
         while self.running:
             time.sleep(1)
             
-            # Keep screen alive periodically
-            if time.time() - self.last_screen_keepalive >= 30:
-                self.keep_screen_alive()
-                self.last_screen_keepalive = time.time()
-            
-            # Check if browser is still running - restart immediately if it died
-            # (but ignore exits during first 15s after launch)
-            if self.browser_process:
-                if self.browser_process.poll() is not None:
-                    elapsed = time.time() - self.browser_launch_time if self.browser_launch_time > 0 else 999
-                    if elapsed < 15:
-                        self.log(f"Browser exited during startup phase ({elapsed:.1f}s) - ignoring (may be normal)", 'info')
-                    else:
-                        self.log("Browser process died, restarting immediately...", 'warning')
-                        consecutive_failures += 1
-                        # Restart immediately - don't wait
-                        self.restart_browser()
-                        last_refresh = time.time()
-                        # Reset failure count after successful restart
-                        if self.browser_process and self.browser_process.poll() is None:
-                            consecutive_failures = 0
-                else:
-                    consecutive_failures = 0
-                    
-                    # Periodically check if URL is still reachable
-                    if time.time() - self.last_url_check > 60:  # Check every minute
-                        url = self.config.get("url", "")
-                        if url:
-                            if not self.check_url_connectivity(url):
-                                self.connection_failures += 1
-                                self.log(f"URL connectivity lost, restarting browser (failure #{self.connection_failures})...", 'warning')
-                                self.restart_browser()
-                                last_refresh = time.time()
-                            else:
-                                self.connection_failures = 0
-                        self.last_url_check = time.time()
-            
             # Auto-refresh
-            elapsed = time.time() - last_refresh
-            if elapsed >= refresh_interval:
-                self.log(f"Auto-refreshing page (interval: {refresh_interval}s)...")
-                if self.refresh_page():
-                    last_refresh = time.time()
+            if time.time() - last_refresh >= refresh_interval:
+                self.log("Auto-refresh")
+                if self.browser_process and self.browser_process.poll() is None:
+                    try:
+                        subprocess.run(["xdotool", "key", "F5"], timeout=2,
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    except Exception:
+                        self.restart_browser()
                 else:
-                    self.log("Refresh failed, will retry on next cycle", 'warning')
-                    last_refresh = time.time() - (refresh_interval / 2)  # Retry sooner
+                    self.restart_browser()
+                last_refresh = time.time()
         
         self.close_browser()
-        self.log("Piview stopped")
+        self.log("Shutdown complete")
 
 def main():
-    """Entry point"""
     try:
-        piview = Piview()
+        piview = FactoryPiview()
         piview.run()
     except Exception as e:
-        print(f"Fatal error: {e}")
+        print(f"FATAL: {e}")
         sys.exit(1)
 
 if __name__ == "__main__":
