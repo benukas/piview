@@ -52,48 +52,48 @@ BOOT=$(findmnt -n -o OPTIONS /boot 2>/dev/null | grep -o ro || echo "")
 
 if [ -n "$ROOT" ] || [ -n "$BOOT" ]; then
     echo ""
-    echo "⚠️  ERROR: Read-only filesystem is ENABLED"
+    echo "⚠️  ERROR: Read-only filesystem is ENABLED (currently mounted as read-only)"
     echo ""
     echo "Installation cannot proceed with read-only mode enabled."
     echo "Please disable it first:"
     echo ""
-    echo "  1. Run: sudo overlayroot.sh disable"
-    echo "  2. Reboot: sudo reboot"
-    echo "  3. Run this installer again after reboot"
-    echo ""
-    echo "Or if you're uninstalling/reinstalling:"
-    echo "  1. Run: ./uninstall.sh"
-    echo "  2. It will disable read-only and ask you to reboot"
-    echo "  3. After reboot, run this installer again"
+    echo "  1. Run: sudo overlayroot.sh disable (if available)"
+    echo "  2. Or use raspi-config: Advanced Options > Overlay Filesystem > Disable"
+    echo "  3. Reboot: sudo reboot"
+    echo "  4. Run this installer again after reboot"
     echo ""
     exit 1
 fi
 
-# Also check cmdline.txt and fstab for read-only flags
+# Filesystem is writable - check for leftover flags in config files and clean them up
+CLEANED_FLAGS=false
+
+# Check and clean cmdline.txt
 if [ -f /boot/cmdline.txt ] && grep -q "fastboot noswap" /boot/cmdline.txt 2>/dev/null; then
-    echo ""
-    echo "⚠️  WARNING: Read-only flags found in /boot/cmdline.txt"
-    echo "   These will be applied on next reboot."
-    echo "   Please disable read-only mode first: sudo overlayroot.sh disable"
-    echo ""
-    read -p "Continue anyway? (y/n) " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        exit 1
+    echo "Found leftover read-only flags in /boot/cmdline.txt (cleaning up)..."
+    if [ -f /boot/cmdline.txt.backup ]; then
+        sudo cp /boot/cmdline.txt.backup /boot/cmdline.txt
+    else
+        sudo sed -i 's/ fastboot noswap//' /boot/cmdline.txt 2>/dev/null || true
     fi
+    CLEANED_FLAGS=true
 fi
 
+# Check and clean fstab
 if [ -f /etc/fstab ] && grep -q "defaults,ro" /etc/fstab 2>/dev/null; then
-    echo ""
-    echo "⚠️  WARNING: Read-only flags found in /etc/fstab"
-    echo "   These will be applied on next reboot."
-    echo "   Please disable read-only mode first: sudo overlayroot.sh disable"
-    echo ""
-    read -p "Continue anyway? (y/n) " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        exit 1
+    echo "Found leftover read-only flags in /etc/fstab (cleaning up)..."
+    if [ -f /etc/fstab.backup ]; then
+        sudo cp /etc/fstab.backup /etc/fstab
+    else
+        sudo sed -i 's/vfat defaults,ro/vfat defaults/' /etc/fstab 2>/dev/null || true
+        sudo sed -i 's/ext4 defaults,ro/ext4 defaults/' /etc/fstab 2>/dev/null || true
     fi
+    CLEANED_FLAGS=true
+fi
+
+if [ "$CLEANED_FLAGS" = true ]; then
+    echo "✓ Cleaned up leftover read-only flags from config files"
+    echo ""
 fi
 
 echo "✓ Filesystem is writable - installation can proceed"
@@ -117,7 +117,7 @@ elif [ -f /sys/class/dmi/id/sys_vendor ] && grep -qi "virtualbox" /sys/class/dmi
 else
     echo "Warning: This doesn't appear to be a Raspberry Pi or VirtualBox"
     echo "Some features may not work correctly on this system."
-    read -p "Continue anyway? (y/n) " -n 1 -r
+    ask_tty_yn "Continue anyway?" CONTINUE_REPLY "y"
     echo
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
         exit 1
