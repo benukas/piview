@@ -654,16 +654,10 @@ sudo tee $CONFIG_DIR/config.json > /dev/null << EOF
     "--disable-infobars",
     "--disable-session-crashed-bubble",
     "--disable-restore-session-state",
-    "--autoplay-policy=no-user-gesture-required",
-    "--disable-features=TranslateUI",
-    "--disable-ipc-flooding-protection",
-    "--disable-background-networking",
-    "--disable-default-apps",
     "--disable-sync",
     "--disable-dev-shm-usage",
     "--no-sandbox",
     "--disable-gpu",
-    "--disable-software-rasterizer",
     "--user-data-dir=/tmp/chromium-ssl-bypass"
   ]
 }
