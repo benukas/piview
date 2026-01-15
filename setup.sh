@@ -627,6 +627,8 @@ sudo ln -sf $APP_DIR/export_logs.sh /usr/local/bin/piview-export-logs 2>/dev/nul
 
 # Install screen keepalive as backup service
 echo "Installing screen keepalive backup service..."
+# Detect user for keepalive service too
+KEEPALIVE_USER="${ACTUAL_USER:-${USER:-pi}}"
 sudo tee /etc/systemd/system/piview-keepalive.service > /dev/null << EOF
 [Unit]
 Description=Piview Screen Keepalive Backup
@@ -635,8 +637,10 @@ Requires=graphical.target
 
 [Service]
 Type=simple
-User=$USER
+User=$KEEPALIVE_USER
+Group=$KEEPALIVE_USER
 Environment=DISPLAY=:0
+Environment=XAUTHORITY=/home/$KEEPALIVE_USER/.Xauthority
 ExecStart=/opt/piview/screen_keepalive.sh
 Restart=always
 RestartSec=10
@@ -648,6 +652,16 @@ sudo systemctl enable piview-keepalive.service 2>/dev/null || true
 
 # Install systemd service with aggressive restart policy
 echo "Installing systemd service with bulletproof restart policy..."
+
+# Detect the actual user (fallback to 'pi' if not set)
+ACTUAL_USER="${USER:-pi}"
+if [ -z "$ACTUAL_USER" ] || [ "$ACTUAL_USER" = "root" ]; then
+    # Try to get the first non-root user
+    ACTUAL_USER=$(getent passwd | awk -F: '$3 >= 1000 && $1 != "nobody" {print $1; exit}' || echo "pi")
+fi
+
+echo "Using user: $ACTUAL_USER for systemd service" >&2
+
 if [ "$NEED_X_SERVER" = true ]; then
     # Lite version - needs startx
     sudo tee /etc/systemd/system/piview.service > /dev/null << EOF
@@ -659,9 +673,10 @@ Requires=network-online.target
 
 [Service]
 Type=simple
-User=$USER
+User=$ACTUAL_USER
+Group=$ACTUAL_USER
 Environment=DISPLAY=:0
-Environment=XAUTHORITY=/home/$USER/.Xauthority
+Environment=XAUTHORITY=/home/$ACTUAL_USER/.Xauthority
 
 # Pre-start: Wait for network and prepare
 ExecStartPre=/bin/sleep 3
@@ -699,9 +714,10 @@ Requires=network-online.target
 
 [Service]
 Type=simple
-User=$USER
+User=$ACTUAL_USER
+Group=$ACTUAL_USER
 Environment=DISPLAY=:0
-Environment=XAUTHORITY=/home/$USER/.Xauthority
+Environment=XAUTHORITY=/home/$ACTUAL_USER/.Xauthority
 
 # Pre-start: Wait for X server and ensure screen blanking is disabled
 ExecStartPre=/bin/bash -c 'for i in {1..30}; do xset q >/dev/null 2>&1 && break || sleep 1; done'

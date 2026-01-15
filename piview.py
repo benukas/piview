@@ -40,7 +40,7 @@ DEFAULT_CONFIG = {
         "--autoplay-policy=no-user-gesture-required",
         "--disable-features=TranslateUI",
         "--disable-ipc-flooding-protection",
-        "--disable-background-networking",
+        # "--disable-background-networking",  # Removed: can cause immediate exit on Pi OS Lite
         "--disable-default-apps",
         "--disable-sync",
         "--disable-dev-shm-usage",
@@ -68,6 +68,7 @@ class Piview:
         self.running = True
         self.browser_process = None
         self.browser_restart_count = 0
+        self.browser_launch_time = 0  # Track when browser was launched (for ignoring early exits)
         self.last_browser_check = time.time()
         self.last_screen_keepalive = time.time()
         self.last_health_check = time.time()
@@ -231,11 +232,15 @@ class Piview:
             try:
                 time.sleep(self.config.get("health_check_interval", 10))
                 
-                # Check browser process
+                # Check browser process (but ignore exits during first 15s after launch)
                 if self.browser_process:
                     if self.browser_process.poll() is not None:
-                        self.log("Browser process died, restarting...", 'warning')
-                        self.restart_browser()
+                        elapsed = time.time() - self.browser_launch_time if self.browser_launch_time > 0 else 999
+                        if elapsed < 15:
+                            self.log(f"Browser exited during startup phase ({elapsed:.1f}s) - ignoring (may be normal)", 'info')
+                        else:
+                            self.log("Browser process died, restarting...", 'warning')
+                            self.restart_browser()
                 
                 # Check X server
                 if os.environ.get('DISPLAY'):
@@ -644,9 +649,44 @@ class Piview:
             self.log("X server not available, cannot open browser", 'error')
             return False
         
-        # Set display
+        # Set display and XAUTHORITY (critical for X server authentication)
         display = os.environ.get('DISPLAY', ':0')
         os.environ['DISPLAY'] = display
+        
+        # Set XAUTHORITY if not already set - required for Chromium to authenticate with X server
+        if 'XAUTHORITY' not in os.environ:
+            # Try common locations
+            username = os.environ.get('USER', os.environ.get('USERNAME', 'pi'))
+            xauth_paths = [
+                f"/home/{username}/.Xauthority",
+                os.path.expanduser("~/.Xauthority"),
+                "/root/.Xauthority"
+            ]
+            for xauth_path in xauth_paths:
+                if os.path.exists(xauth_path):
+                    os.environ['XAUTHORITY'] = xauth_path
+                    self.log(f"Set XAUTHORITY={xauth_path}")
+                    break
+            else:
+                # If not found, try to detect from X server
+                try:
+                    result = subprocess.run(
+                        ["xauth", "list"],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL,
+                        timeout=2
+                    )
+                    if result.returncode == 0:
+                        # Xauth works, try to find the file
+                        xauth_file = os.path.expanduser("~/.Xauthority")
+                        if os.path.exists(xauth_file):
+                            os.environ['XAUTHORITY'] = xauth_file
+                            self.log(f"Set XAUTHORITY={xauth_file} (detected)")
+                except Exception:
+                    pass
+        
+        # Log X server environment for debugging
+        self.log(f"X Server Environment: DISPLAY={os.environ.get('DISPLAY')}, XAUTHORITY={os.environ.get('XAUTHORITY', 'NOT SET')}")
         
         # Verify X server is actually working
         try:
@@ -747,13 +787,23 @@ class Piview:
                 env=os.environ.copy()
             )
             
-            # Wait a moment to see if it starts successfully
-            time.sleep(4)  # Give it time to load
+            # Record launch time (for ignoring early exits)
+            self.browser_launch_time = time.time()
+            
+            # Wait longer to see if it starts successfully (increased from 4s to 8s)
+            time.sleep(8)  # Give it more time to load and render
+            
+            # Only check for immediate exit if browser has been running for at least 15 seconds
+            # This prevents false positives during the initial startup phase
             if self.browser_process.poll() is not None:
                 exit_code = self.browser_process.returncode
-                self.log(f"Browser exited immediately after start (exit code: {exit_code})", 'error')
-                # Try to get stderr for debugging
-                return False
+                elapsed = time.time() - self.browser_launch_time
+                if elapsed < 15:
+                    self.log(f"Browser exited during startup phase ({elapsed:.1f}s) - may be normal, will retry", 'warning')
+                    return False
+                else:
+                    self.log(f"Browser exited after startup (exit code: {exit_code}, ran for {elapsed:.1f}s)", 'error')
+                    return False
             
             self.log(f"Browser opened successfully: {url}")
             
@@ -840,16 +890,21 @@ class Piview:
                 self.last_screen_keepalive = time.time()
             
             # Check if browser is still running - restart immediately if it died
+            # (but ignore exits during first 15s after launch)
             if self.browser_process:
                 if self.browser_process.poll() is not None:
-                    self.log("Browser process died, restarting immediately...", 'warning')
-                    consecutive_failures += 1
-                    # Restart immediately - don't wait
-                    self.restart_browser()
-                    last_refresh = time.time()
-                    # Reset failure count after successful restart
-                    if self.browser_process and self.browser_process.poll() is None:
-                        consecutive_failures = 0
+                    elapsed = time.time() - self.browser_launch_time if self.browser_launch_time > 0 else 999
+                    if elapsed < 15:
+                        self.log(f"Browser exited during startup phase ({elapsed:.1f}s) - ignoring (may be normal)", 'info')
+                    else:
+                        self.log("Browser process died, restarting immediately...", 'warning')
+                        consecutive_failures += 1
+                        # Restart immediately - don't wait
+                        self.restart_browser()
+                        last_refresh = time.time()
+                        # Reset failure count after successful restart
+                        if self.browser_process and self.browser_process.poll() is None:
+                            consecutive_failures = 0
                 else:
                     consecutive_failures = 0
                     
