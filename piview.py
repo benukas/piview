@@ -48,7 +48,13 @@ DEFAULT_CONFIG = {
         "--disable-session-crashed-bubble",
         "--no-sandbox",
         "--disable-dev-shm-usage",
-        "--disable-gpu",  # Safer for factory environments
+        "--disable-gpu",
+        "--disable-gpu-compositing",
+        "--disable-accelerated-2d-canvas",
+        "--disable-accelerated-video-decode",
+        "--disable-accelerated-video-encode",
+        "--disable-accelerated-mjpeg-decode",
+        "--disable-software-rasterizer",
         "--user-data-dir=/tmp/chromium-piview"
     ]
 }
