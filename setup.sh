@@ -95,6 +95,32 @@ if [ -z "$ACTUAL_USER" ] || [ "$ACTUAL_USER" = "root" ]; then
 fi
 echo "Installing for user: $ACTUAL_USER"
 
+# Browser selection (before package installation)
+echo ""
+echo "Browser Selection:"
+echo "  1) Chromium (recommended for Raspberry Pi)"
+echo "  2) Firefox"
+exec < /dev/tty
+ask_tty "Choose browser (1/2)" BROWSER_CHOICE "1"
+
+if [[ $BROWSER_CHOICE == "2" ]]; then
+    BROWSER_TYPE="firefox"
+    BROWSER_CMD="firefox"
+else
+    BROWSER_TYPE="chromium"
+    BROWSER_CMD="chromium-browser"
+fi
+
+# Hardware acceleration
+echo ""
+exec < /dev/tty
+ask_tty_yn "Enable hardware acceleration?" HW_ACCEL_REPLY "n"
+if [[ $HW_ACCEL_REPLY =~ ^[Yy]$ ]]; then
+    ENABLE_HW_ACCEL="true"
+else
+    ENABLE_HW_ACCEL="false"
+fi
+
 # Update packages
 echo ""
 exec < /dev/tty
@@ -113,7 +139,6 @@ echo ""
 echo "Installing dependencies..."
 
 PACKAGES=(
-    "chromium-browser"
     "python3"
     "python3-pip"
     "python3-psutil"
@@ -128,6 +153,13 @@ PACKAGES=(
     "libnss3-tools"
 )
 
+# Add browser based on selection
+if [ "$BROWSER_TYPE" = "firefox" ]; then
+    PACKAGES+=("firefox-esr")
+else
+    PACKAGES+=("chromium-browser")
+fi
+
 # Check if we need X server (Lite vs Desktop)
 if [ -n "$DISPLAY" ] || [ -d /usr/share/X11 ]; then
     echo "Desktop environment detected"
@@ -138,6 +170,44 @@ fi
 
 echo "Installing: ${PACKAGES[@]}"
 sudo apt-get install -y "${PACKAGES[@]}" 2>&1 | grep -v "is already the newest version" || true
+
+# Verify browser installation
+echo ""
+if [ "$BROWSER_TYPE" = "firefox" ]; then
+    if command -v firefox &> /dev/null || command -v firefox-esr &> /dev/null; then
+        echo -e "${GREEN}✓ Firefox installed${NC}"
+    else
+        echo -e "${YELLOW}Warning: Firefox not found after installation${NC}"
+    fi
+else
+    if command -v chromium-browser &> /dev/null || command -v chromium &> /dev/null; then
+        echo -e "${GREEN}✓ Chromium installed${NC}"
+    else
+        echo -e "${YELLOW}Warning: Chromium not found after installation${NC}"
+    fi
+fi
+
+# Verify xdotool (required for watchdog)
+if command -v xdotool &> /dev/null; then
+    echo -e "${GREEN}✓ xdotool installed${NC}"
+    XDOTOOL_VERSION=$(xdotool --version 2>/dev/null || echo "unknown")
+    echo "  Version: $XDOTOOL_VERSION"
+else
+    echo -e "${RED}ERROR: xdotool not found after installation${NC}"
+    echo "xdotool is required for the watchdog feature to work properly."
+    echo "Attempting to install xdotool..."
+    sudo apt-get install -y xdotool || {
+        echo -e "${RED}Failed to install xdotool. Please install manually:${NC}"
+        echo "  sudo apt-get install xdotool"
+        exit 1
+    }
+    if command -v xdotool &> /dev/null; then
+        echo -e "${GREEN}✓ xdotool installed successfully${NC}"
+    else
+        echo -e "${RED}ERROR: xdotool installation failed${NC}"
+        exit 1
+    fi
+fi
 
 # Verify psutil
 if ! python3 -c "import psutil" 2>/dev/null; then
@@ -227,11 +297,51 @@ ask_tty "Health endpoint port" HEALTH_PORT "8888"
 # Create config
 echo ""
 echo "Creating configuration..."
+# Build kiosk flags based on browser and hardware acceleration
+if [ "$BROWSER_TYPE" = "firefox" ]; then
+    KIOSK_FLAGS_JSON="[
+    \"-kiosk\",
+    \"--new-instance\"
+  ]"
+else
+    # Chromium flags
+    if [ "$ENABLE_HW_ACCEL" = "true" ]; then
+        KIOSK_FLAGS_JSON="[
+    \"--kiosk\",
+    \"--noerrdialogs\",
+    \"--disable-infobars\",
+    \"--disable-session-crashed-bubble\",
+    \"--no-sandbox\",
+    \"--disable-dev-shm-usage\",
+    \"--user-data-dir=/tmp/chromium-piview\"
+  ]"
+    else
+        KIOSK_FLAGS_JSON="[
+    \"--kiosk\",
+    \"--noerrdialogs\",
+    \"--disable-infobars\",
+    \"--disable-session-crashed-bubble\",
+    \"--no-sandbox\",
+    \"--disable-dev-shm-usage\",
+    \"--disable-gpu\",
+    \"--disable-gpu-compositing\",
+    \"--disable-accelerated-2d-canvas\",
+    \"--disable-accelerated-video-decode\",
+    \"--disable-accelerated-video-encode\",
+    \"--disable-accelerated-mjpeg-decode\",
+    \"--disable-software-rasterizer\",
+    \"--user-data-dir=/tmp/chromium-piview\"
+  ]"
+    fi
+fi
+
 cat > "$CONFIG_DIR/config.json" << EOF
 {
   "url": "$USER_URL",
   "refresh_interval": $REFRESH_INTERVAL,
-  "browser": "chromium-browser",
+  "browser": "$BROWSER_CMD",
+  "browser_type": "$BROWSER_TYPE",
+  "enable_hardware_acceleration": $ENABLE_HW_ACCEL,
   "health_check_interval": 10,
   "max_browser_restarts": 10,
   "ignore_ssl_errors": $IGNORE_SSL,
@@ -246,22 +356,7 @@ cat > "$CONFIG_DIR/config.json" << EOF
   "disk_space_warning_mb": 500,
   "log_rotation_size_mb": 10,
   "health_endpoint_port": $HEALTH_PORT,
-  "kiosk_flags": [
-    "--kiosk",
-    "--noerrdialogs",
-    "--disable-infobars",
-    "--disable-session-crashed-bubble",
-    "--no-sandbox",
-    "--disable-dev-shm-usage",
-    "--disable-gpu",
-    "--disable-gpu-compositing",
-    "--disable-accelerated-2d-canvas",
-    "--disable-accelerated-video-decode",
-    "--disable-accelerated-video-encode",
-    "--disable-accelerated-mjpeg-decode",
-    "--disable-software-rasterizer",
-    "--user-data-dir=/tmp/chromium-piview"
-  ]
+  "kiosk_flags": $KIOSK_FLAGS_JSON
 }
 EOF
 
@@ -366,6 +461,39 @@ rm -f ~/.config/chromium/SingletonSocket
 echo "Chromium cleanup complete. Try starting again."
 EOF
 
+cat > "$APP_DIR/check-display.sh" << 'EOF'
+#!/bin/bash
+# Check what's displayed and browser status
+echo "=== Display Check ==="
+echo ""
+echo "X Server Status:"
+xset q 2>/dev/null && echo "✓ X server is running" || echo "✗ X server not accessible"
+echo ""
+echo "DISPLAY: $DISPLAY"
+echo "XAUTHORITY: ${XAUTHORITY:-not set}"
+echo ""
+echo "=== Browser Process ==="
+if pgrep -f chromium > /dev/null; then
+    echo "✓ Chromium is running"
+    pgrep -af chromium | head -3
+else
+    echo "✗ Chromium is not running"
+fi
+echo ""
+echo "=== Current URL (from config) ==="
+if [ -f ~/.piview/config.json ]; then
+    python3 -c "import json; c=json.load(open('$HOME/.piview/config.json')); print('URL:', c.get('url', 'not set'))" 2>/dev/null || cat ~/.piview/config.json | grep -o '"url"[^,]*' | head -1
+else
+    echo "Config file not found"
+fi
+echo ""
+echo "=== Service Status ==="
+sudo systemctl status piview.service --no-pager -l | head -15
+echo ""
+echo "=== Recent Logs ==="
+sudo journalctl -u piview.service -n 10 --no-pager | tail -10
+EOF
+
 cat > "$APP_DIR/stop.sh" << 'EOF'
 #!/bin/bash
 sudo systemctl stop piview.service
@@ -404,6 +532,7 @@ echo "  - stop.sh - Stop piview"
 echo "  - status.sh - Check status"
 echo "  - logs.sh - View logs"
 echo "  - fix-chromium.sh - Fix Chromium startup issues"
+echo "  - check-display.sh - Check display and browser status"
 
 # Systemd service
 echo ""

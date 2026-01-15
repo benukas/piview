@@ -86,6 +86,11 @@ class FactoryPiview:
         self.setup_logging()
         self.config = self.load_config()
         
+        # Check for xdotool at startup
+        if not shutil.which("xdotool"):
+            self.log("WARNING: xdotool not found - watchdog and some features may not work properly", 'warning')
+            self.log("Install with: sudo apt-get install xdotool", 'warning')
+        
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
         
@@ -250,36 +255,61 @@ class FactoryPiview:
                 continue
             
             try:
-                # Test if browser window exists
-                result = subprocess.run(
-                    ["xdotool", "search", "--class", "chromium"],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
-                    timeout=5
-                )
+                # Check if xdotool is available
+                xdotool_available = shutil.which("xdotool") is not None
                 
-                if result.returncode == 0 and result.stdout:
-                    last_activity = time.time()
+                if xdotool_available:
+                    # Get browser type for window class
+                    browser_type = self.config.get("browser_type", "chromium")
+                    if browser_type == "firefox":
+                        window_class = "firefox"
+                    else:
+                        window_class = "chromium"
+                    
+                    # Test if browser window exists
+                    result = subprocess.run(
+                        ["xdotool", "search", "--class", window_class],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL,
+                        timeout=5
+                    )
+                    
+                    if result.returncode == 0 and result.stdout:
+                        last_activity = time.time()
+                    else:
+                        elapsed = time.time() - last_activity
+                        if elapsed > freeze_threshold:
+                            self.log(f"WATCHDOG: Browser frozen for {elapsed:.0f}s - KILLING", 'error')
+                            self.consecutive_failures += 1
+                            try:
+                                self.browser_process.kill()
+                                browser_name = "firefox" if browser_type == "firefox" else "chromium"
+                                subprocess.run(["pkill", "-9", "-f", browser_name], 
+                                             timeout=2, check=False,
+                                             stdout=subprocess.DEVNULL,
+                                             stderr=subprocess.DEVNULL)
+                            except Exception:
+                                pass
+                            last_activity = time.time()
                 else:
-                    elapsed = time.time() - last_activity
-                    if elapsed > freeze_threshold:
-                        self.log(f"WATCHDOG: Browser frozen for {elapsed:.0f}s - KILLING", 'error')
-                        self.consecutive_failures += 1
-                        try:
-                            self.browser_process.kill()
-                            subprocess.run(["pkill", "-9", "-f", "chromium"], 
-                                         timeout=2, check=False,
-                                         stdout=subprocess.DEVNULL,
-                                         stderr=subprocess.DEVNULL)
-                        except Exception:
-                            pass
+                    # xdotool not available - warn and use fallback
+                    if not hasattr(self, '_xdotool_warned'):
+                        self.log("WARNING: xdotool not available - watchdog using fallback method (less reliable)", 'warning')
+                        self._xdotool_warned = True
+                    # Fallback: just check if process is running
+                    if self.browser_process and self.browser_process.poll() is None:
+                        last_activity = time.time()
+                    else:
+                        # Process died, reset timer
                         last_activity = time.time()
                         
             except subprocess.TimeoutExpired:
                 elapsed = time.time() - last_activity
                 if elapsed > freeze_threshold:
                     self.log("WATCHDOG: System unresponsive - force kill", 'error')
-                    subprocess.run(["pkill", "-9", "-f", "chromium"], 
+                    browser_type = self.config.get("browser_type", "chromium")
+                    browser_name = "firefox" if browser_type == "firefox" else "chromium"
+                    subprocess.run(["pkill", "-9", "-f", browser_name], 
                                  timeout=2, check=False,
                                  stdout=subprocess.DEVNULL,
                                  stderr=subprocess.DEVNULL)
@@ -474,6 +504,99 @@ class FactoryPiview:
             except Exception:
                 pass
     
+    def create_loading_page(self, target_url):
+        """Create loading page with animated indicator"""
+        # Escape URL for JavaScript
+        js_url = target_url.replace('"', '\\"').replace("'", "\\'")
+        
+        loading_html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>Loading...</title>
+    <meta http-equiv="refresh" content="10;url={target_url}">
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{
+            font-family: Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            background: #000000;
+            color: #fff;
+        }}
+        .loading-container {{
+            text-align: center;
+            padding: 40px;
+        }}
+        .spinner {{
+            border: 4px solid #333;
+            border-top: 4px solid #4a9eff;
+            border-radius: 50%;
+            width: 60px;
+            height: 60px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 30px;
+        }}
+        @keyframes spin {{
+            0% {{ transform: rotate(0deg); }}
+            100% {{ transform: rotate(360deg); }}
+        }}
+        h1 {{ color: #4a9eff; margin-bottom: 20px; font-size: 24px; }}
+        .url {{ color: #888; word-break: break-all; font-size: 14px; margin: 10px 0; max-width: 600px; }}
+        .status {{ color: #666; font-size: 12px; margin-top: 20px; }}
+        .dots::after {{
+            content: '...';
+            animation: dots 1.5s steps(4, end) infinite;
+        }}
+        @keyframes dots {{
+            0%, 20% {{ content: '.'; }}
+            40% {{ content: '..'; }}
+            60% {{ content: '...'; }}
+            80%, 100% {{ content: ''; }}
+        }}
+    </style>
+</head>
+<body>
+    <div class="loading-container">
+        <div class="spinner"></div>
+        <h1>Loading<span class="dots"></span></h1>
+        <p class="url">{target_url}</p>
+        <p class="status">Please wait while the page loads</p>
+        <p class="status" style="margin-top: 10px; color: #444;">If this screen persists, check network connection</p>
+        <p class="status" style="margin-top: 5px; color: #333; font-size: 10px;">Auto-redirecting in 10 seconds...</p>
+    </div>
+    <script>
+        // Multiple redirect methods for reliability
+        var targetUrl = "{js_url}";
+        var redirectAttempted = false;
+        
+        function redirect() {{
+            if (!redirectAttempted) {{
+                redirectAttempted = true;
+                try {{
+                    window.location.href = targetUrl;
+                }} catch(e) {{
+                    window.location.replace(targetUrl);
+                }}
+            }}
+        }}
+        
+        // Try immediate redirect
+        setTimeout(redirect, 1000);
+        
+        // Fallback redirect
+        setTimeout(redirect, 3000);
+        
+        // Final fallback - meta refresh will handle it
+    </script>
+</body>
+</html>"""
+        
+        loading_file = Path("/tmp/piview_loading.html")
+        loading_file.write_text(loading_html)
+        return f"file://{loading_file}"
+    
     def create_error_page(self, error_type, url, details=""):
         """Create local error page"""
         error_html = f"""<!DOCTYPE html>
@@ -489,13 +612,13 @@ class FactoryPiview:
             align-items: center;
             height: 100vh;
             margin: 0;
-            background: #1a1a1a;
+            background: #000000;
             color: #fff;
         }}
         .error-box {{
             text-align: center;
             padding: 40px;
-            background: #2d2d2d;
+            background: #1a1a1a;
             border-radius: 10px;
             max-width: 600px;
         }}
@@ -576,8 +699,32 @@ class FactoryPiview:
         return False
     
     def find_browser(self):
-        """Find browser executable"""
-        for browser in ["chromium-browser", "chromium", "google-chrome"]:
+        """Find browser executable based on config or auto-detect"""
+        # Check config first
+        browser_type = self.config.get("browser_type", "chromium")
+        browser_cmd = self.config.get("browser", None)
+        
+        if browser_cmd:
+            # Try the configured browser first
+            try:
+                result = subprocess.run(
+                    ["which", browser_cmd],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=2
+                )
+                if result.returncode == 0:
+                    return browser_cmd
+            except Exception:
+                pass
+        
+        # Auto-detect based on browser type
+        if browser_type == "firefox":
+            browsers = ["firefox", "firefox-esr"]
+        else:
+            browsers = ["chromium-browser", "chromium", "google-chrome"]
+        
+        for browser in browsers:
             try:
                 result = subprocess.run(
                     ["which", browser],
@@ -612,6 +759,45 @@ class FactoryPiview:
             self.browser_restart_count += 1
             self.consecutive_failures += 1
     
+    def browser_output_monitor(self):
+        """Monitor browser stderr for errors and log them"""
+        if not self.browser_process:
+            return
+        
+        def read_output():
+            try:
+                if self.browser_process and self.browser_process.stderr:
+                    # Read a few lines to catch immediate errors
+                    import queue
+                    import select
+                    
+                    error_count = 0
+                    max_errors = 10
+                    
+                    while self.running and self.browser_process and self.browser_process.poll() is None and error_count < max_errors:
+                        try:
+                            # Try to read a line (non-blocking check)
+                            if hasattr(self.browser_process.stderr, 'readable'):
+                                if self.browser_process.stderr.readable():
+                                    line = self.browser_process.stderr.readline()
+                                    if line:
+                                        line = line.decode('utf-8', errors='ignore').strip()
+                                        if line and len(line) > 5:
+                                            error_count += 1
+                                            # Log important errors
+                                            if any(keyword in line.lower() for keyword in ['error', 'failed', 'crash', 'timeout', 'ssl', 'certificate', 'net::']):
+                                                self.log(f"Browser: {line[:200]}", 'warning')
+                        except (BlockingIOError, OSError, ValueError):
+                            # No data available, sleep and continue
+                            time.sleep(1)
+                        except Exception:
+                            break
+            except Exception as e:
+                # Silently fail - this is just for debugging
+                pass
+        
+        threading.Thread(target=read_output, daemon=True).start()
+    
     def open_url(self, url):
         """Open URL with comprehensive error handling"""
         self.close_browser()
@@ -624,6 +810,9 @@ class FactoryPiview:
             self.log("No browser found", 'error')
             return False
         
+        original_url = url
+        show_loading = True
+        
         # Check connectivity - don't proceed if DNS fails
         if not self.check_url_connectivity(url):
             self.log("URL not reachable - showing error page", 'error')
@@ -632,28 +821,52 @@ class FactoryPiview:
                 url,
                 "DNS resolution failed or host unreachable"
             )
+            show_loading = False
+        elif show_loading:
+            # Show loading page first, then navigate to real URL
+            loading_url = self.create_loading_page(original_url)
+            url = loading_url
         
         self.prevent_screen_blanking()
         
-        # Minimal, stable flags
-        kiosk_flags = [
-            "--kiosk",
-            "--noerrdialogs",
-            "--disable-infobars",
-            "--disable-session-crashed-bubble",
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--disable-gpu-compositing",
-            "--disable-accelerated-2d-canvas",
-            "--disable-accelerated-video-decode",
-            "--disable-accelerated-video-encode",
-            "--disable-accelerated-mjpeg-decode",
-            "--disable-software-rasterizer",
-            "--user-data-dir=/tmp/chromium-piview"
-        ]
+        # Get browser type and build appropriate flags
+        browser_type = self.config.get("browser_type", "chromium")
+        enable_hw_accel = self.config.get("enable_hardware_acceleration", False)
         
-        if not self.config.get("cert_installed", False) and \
+        # Use config flags if available, otherwise build them
+        if "kiosk_flags" in self.config and isinstance(self.config["kiosk_flags"], list):
+            kiosk_flags = self.config["kiosk_flags"].copy()
+        else:
+            # Build flags based on browser type
+            if browser_type == "firefox":
+                kiosk_flags = ["-kiosk", "--new-instance"]
+            else:
+                # Chromium flags
+                kiosk_flags = [
+                    "--kiosk",
+                    "--noerrdialogs",
+                    "--disable-infobars",
+                    "--disable-session-crashed-bubble",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--user-data-dir=/tmp/chromium-piview"
+                ]
+                
+                # Add hardware acceleration disabling if not enabled
+                if not enable_hw_accel:
+                    kiosk_flags.extend([
+                        "--disable-gpu",
+                        "--disable-gpu-compositing",
+                        "--disable-accelerated-2d-canvas",
+                        "--disable-accelerated-video-decode",
+                        "--disable-accelerated-video-encode",
+                        "--disable-accelerated-mjpeg-decode",
+                        "--disable-software-rasterizer"
+                    ])
+        
+        # Add SSL flags for Chromium only
+        if browser_type != "firefox" and \
+           not self.config.get("cert_installed", False) and \
            self.config.get("ignore_ssl_errors", True):
             kiosk_flags.extend([
                 "--ignore-certificate-errors",
@@ -668,6 +881,8 @@ class FactoryPiview:
             if 'XAUTHORITY' in os.environ:
                 env['XAUTHORITY'] = os.environ['XAUTHORITY']
             
+            self.log(f"Launching browser: {browser_cmd} with URL: {original_url}")
+            
             self.browser_process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -675,12 +890,20 @@ class FactoryPiview:
                 env=env
             )
             
+            # Start monitoring browser output
+            self.browser_output_monitor()
+            
             time.sleep(2)
             if self.browser_process.poll() is not None:
+                self.log("Browser exited immediately after launch", 'error')
                 return False
             
             self.browser_launch_time = time.time()
-            time.sleep(5)
+            
+            # Loading page will auto-redirect via JavaScript
+            # If that fails, we'll restart with the real URL after a timeout
+            
+            time.sleep(2)
             
             if self.browser_process.poll() is None:
                 self.log("Browser launched successfully")
@@ -739,8 +962,14 @@ class FactoryPiview:
                 self.log("Auto-refresh")
                 if self.browser_process and self.browser_process.poll() is None:
                     try:
-                        subprocess.run(["xdotool", "key", "F5"], timeout=2,
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        # Check if xdotool is available
+                        if shutil.which("xdotool"):
+                            subprocess.run(["xdotool", "key", "F5"], timeout=2,
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        else:
+                            # Fallback: restart browser if xdotool not available
+                            self.log("xdotool not available, restarting browser for refresh", 'warning')
+                            self.restart_browser()
                     except Exception:
                         self.restart_browser()
                 else:
