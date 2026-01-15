@@ -6,6 +6,23 @@
 
 set -e
 
+# Helper function for pipe-safe prompts
+ask_tty_yn() {
+    local prompt_text=$1
+    local var_name=$2
+    local default_val=$3
+    
+    echo -n "$prompt_text [$default_val]: " >&2
+    read -n 1 response </dev/tty 2>/dev/null || response="$default_val"
+    echo "" >&2
+    
+    if [ -z "$response" ]; then
+        response="$default_val"
+    fi
+    
+    eval "$var_name=\"$response\""
+}
+
 echo "=========================================="
 echo "Piview Reinstall (Two-Phase Process)"
 echo "=========================================="
@@ -86,9 +103,8 @@ else
     echo ""
     echo "After reboot, run this script again to complete installation."
     echo ""
-    read -p "Continue? (y/n) " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    ask_tty_yn "Continue?" CONTINUE_REPLY "y"
+    if [[ ! $CONTINUE_REPLY =~ ^[Yy]$ ]]; then
         exit 1
     fi
     
