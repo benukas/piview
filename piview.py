@@ -638,6 +638,12 @@ class FactoryPiview:
             "--no-sandbox",
             "--disable-dev-shm-usage",
             "--disable-gpu",
+            "--disable-gpu-compositing",
+            "--disable-accelerated-2d-canvas",
+            "--disable-accelerated-video-decode",
+            "--disable-accelerated-video-encode",
+            "--disable-accelerated-mjpeg-decode",
+            "--disable-software-rasterizer",
             "--user-data-dir=/tmp/chromium-piview"
         ]
         
