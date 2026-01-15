@@ -919,10 +919,10 @@ class Piview:
     
     def run(self):
         """Main loop - display URL with auto-refresh and monitoring"""
-        url = self.config.get("url", "https://example.com")
+        url = self.config.get("url", "http://example.com")
         refresh_interval = self.config.get("refresh_interval", 60)
         
-        if not url or url == "https://example.com":
+        if not url or url == "http://example.com" or url == "https://example.com":
             self.log("Warning: Using default URL. Please configure your URL.", 'warning')
             self.log(f"Edit config at: {USER_CONFIG_FILE} or {CONFIG_FILE}", 'warning')
         
