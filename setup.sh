@@ -101,7 +101,11 @@ exec < /dev/tty
 ask_tty_yn "Update package lists?" UPDATE_REPLY "y"
 if [[ $UPDATE_REPLY =~ ^[Yy]$ ]]; then
     echo "Updating package lists..."
-    sudo apt-get update -qq
+    # Try normal update first
+    if ! sudo apt-get update -qq 2>/dev/null; then
+        echo "Standard update failed, trying with --allow-releaseinfo-change..."
+        sudo apt-get update --allow-releaseinfo-change -qq || true
+    fi
 fi
 
 # Install dependencies
@@ -118,6 +122,8 @@ PACKAGES=(
     "x11-xserver-utils"
     "xdotool"
     "unclutter"
+    "sed"
+    "mc"
     "ca-certificates"
     "libnss3-tools"
 )
@@ -180,6 +186,20 @@ echo ""
 exec < /dev/tty
 ask_tty "Dashboard URL" USER_URL "http://example.com"
 ask_tty "Refresh interval (seconds)" REFRESH_INTERVAL "60"
+
+# Proxy configuration
+echo ""
+exec < /dev/tty
+ask_tty_yn "Configure proxy?" PROXY_REPLY "n"
+if [[ $PROXY_REPLY =~ ^[Yy]$ ]]; then
+    ask_tty "Proxy server (e.g., http://192.168.1.30:3128/)" PROXY_SERVER ""
+    ask_tty "No proxy hosts (e.g., localhost,127.0.0.1,zoro.sba.lt)" NO_PROXY "localhost,127.0.0.1"
+    CONFIGURE_PROXY="true"
+else
+    CONFIGURE_PROXY="false"
+    PROXY_SERVER=""
+    NO_PROXY=""
+fi
 
 # SSL handling
 echo ""
@@ -247,6 +267,81 @@ EOF
 
 echo -e "${GREEN}✓ Config: $CONFIG_DIR/config.json${NC}"
 
+# Create kiosk.sh script (Lithuanian instructions pattern)
+echo ""
+echo "Creating kiosk.sh script..."
+cat > "$HOME/kiosk.sh" << KIOEOF
+#!/bin/bash
+xset s noblank
+xset s off
+xset -dpms
+
+unclutter -idle 0.5 -root &
+
+# Fix Chromium preferences to prevent crash warnings
+CHROMIUM_PREFS="$HOME/.config/chromium/Default/Preferences"
+if [ -f "\$CHROMIUM_PREFS" ]; then
+    sed -i 's/"exited_cleanly":false/"exited_cleanly":true/' "\$CHROMIUM_PREFS"
+    sed -i 's/"exit_type":"Crashed"/"exit_type":"Normal"/' "\$CHROMIUM_PREFS"
+fi
+
+# Get URL from config or use default
+URL="\${1:-http://example.com}"
+REFRESH_INTERVAL="\${2:-120}"
+
+# Launch Chromium in kiosk mode
+/usr/bin/chromium-browser --noerrdialogs --disable-features=TranslateUI --disable-infobars --kiosk "\$URL" &
+
+# Refresh loop (optional - can be disabled by setting REFRESH_INTERVAL=0)
+if [ "\$REFRESH_INTERVAL" != "0" ] && [ "\$REFRESH_INTERVAL" -gt 0 ]; then
+    while true; do
+        sleep "\$REFRESH_INTERVAL"
+        xdotool key "F5" &
+    done
+fi
+KIOEOF
+
+# Add support for multiple URLs (tab switching) as comments
+cat >> "$HOME/kiosk.sh" << 'KIOEOF2'
+
+# Alternative: Multiple URLs with tab switching
+# To use multiple URLs, replace the single URL launch above with:
+# /usr/bin/chromium-browser --noerrdialogs --disable-features=TranslateUI --disable-infobars --kiosk "http://url1 http://url2" &
+# while true; do
+#     xdotool keydown ctrl+Tab; xdotool keyup ctrl+Tab;
+#     sleep 10
+# done
+KIOEOF2
+
+chmod +x "$HOME/kiosk.sh"
+
+echo -e "${GREEN}✓ kiosk.sh created at $HOME/kiosk.sh${NC}"
+
+# Configure proxy if requested
+if [ "$CONFIGURE_PROXY" = "true" ] && [ -n "$PROXY_SERVER" ]; then
+    echo ""
+    echo "Configuring proxy..."
+    if [ -f /etc/environment ]; then
+        # Backup
+        sudo cp /etc/environment /etc/environment.backup 2>/dev/null || true
+        
+        # Remove existing proxy settings
+        sudo sed -i '/^http_proxy=/d' /etc/environment
+        sudo sed -i '/^https_proxy=/d' /etc/environment
+        sudo sed -i '/^no_proxy=/d' /etc/environment
+        
+        # Add new proxy settings
+        echo "http_proxy=$PROXY_SERVER" | sudo tee -a /etc/environment > /dev/null
+        echo "https_proxy=$PROXY_SERVER" | sudo tee -a /etc/environment > /dev/null
+        if [ -n "$NO_PROXY" ]; then
+            echo "no_proxy=\"$NO_PROXY\"" | sudo tee -a /etc/environment > /dev/null
+        fi
+        
+        echo -e "${GREEN}✓ Proxy configured in /etc/environment${NC}"
+        echo "Note: Proxy settings will take effect after reboot or logout/login"
+    fi
+fi
+
 # Create helper scripts
 echo ""
 echo "Creating helper scripts..."
@@ -255,6 +350,20 @@ cat > "$APP_DIR/restart.sh" << 'EOF'
 #!/bin/bash
 sudo systemctl restart piview.service
 echo "Piview restarted"
+EOF
+
+cat > "$APP_DIR/fix-chromium.sh" << 'EOF'
+#!/bin/bash
+# Fix Chromium if it won't start (from Lithuanian instructions)
+echo "Fixing Chromium..."
+pkill chromium 2>/dev/null || true
+pkill chromium-browser 2>/dev/null || true
+
+rm -f ~/.config/chromium/SingletonLock
+rm -f ~/.config/chromium/SingletonCookie
+rm -f ~/.config/chromium/SingletonSocket
+
+echo "Chromium cleanup complete. Try starting again."
 EOF
 
 cat > "$APP_DIR/stop.sh" << 'EOF'
@@ -290,26 +399,40 @@ EOF
 sudo chmod +x "$APP_DIR"/*.sh
 
 echo -e "${GREEN}✓ Helper scripts installed${NC}"
+echo "  - restart.sh - Restart piview service"
+echo "  - stop.sh - Stop piview"
+echo "  - status.sh - Check status"
+echo "  - logs.sh - View logs"
+echo "  - fix-chromium.sh - Fix Chromium startup issues"
 
 # Systemd service
 echo ""
 echo "Installing systemd service..."
 
+# Detect DISPLAY value
+DETECTED_DISPLAY="${DISPLAY:-:0}"
+if [ -z "$DISPLAY" ]; then
+    # Try to detect from X server
+    if [ -S /tmp/.X11-unix/X0 ]; then
+        DETECTED_DISPLAY=":0"
+    else
+        DETECTED_DISPLAY=":0.0"
+    fi
+fi
+
 sudo tee /etc/systemd/system/piview.service > /dev/null << EOF
 [Unit]
 Description=Piview Factory Kiosk - Bulletproof Display
-After=network-online.target graphical.target
-Wants=network-online.target
-StartLimitIntervalSec=0
+Wants=graphical.target
+After=graphical.target
 
 [Service]
+Environment=DISPLAY=$DETECTED_DISPLAY
+Environment=XAUTHORITY=$HOME/.Xauthority
 Type=simple
+ExecStart=/usr/bin/python3 $APP_DIR/piview.py
 User=$ACTUAL_USER
 Group=$ACTUAL_USER
-WorkingDirectory=$APP_DIR
-ExecStart=/usr/bin/python3 $APP_DIR/piview.py
-Environment=DISPLAY=:0
-Environment=XAUTHORITY=/home/$ACTUAL_USER/.Xauthority
 
 # Factory hardening
 Restart=always
@@ -355,11 +478,36 @@ ExecStart=/bin/sh -c 'echo 0 > /sys/module/kernel/parameters/consoleblank'
 WantedBy=sysinit.target
 EOF
 
+# Also create kiosk.service (alternative simple service from instructions)
+echo ""
+echo "Creating alternative kiosk.service..."
+sudo tee /lib/systemd/system/kiosk.service > /dev/null << KIOEOF
+[Unit]
+Description=Chromium Kiosk
+Wants=graphical.target
+After=graphical.target
+
+[Service]
+Environment=DISPLAY=$DETECTED_DISPLAY
+Environment=XAUTHORITY=$HOME/.Xauthority
+Type=simple
+ExecStart=/bin/bash $HOME/kiosk.sh $USER_URL $REFRESH_INTERVAL
+Restart=on-abort
+User=$ACTUAL_USER
+Group=$ACTUAL_USER
+
+[Install]
+WantedBy=graphical.target
+KIOEOF
+
 sudo systemctl daemon-reload
 sudo systemctl enable disable-screen-blanking.service
 sudo systemctl enable piview.service
 
 echo -e "${GREEN}✓ Services configured${NC}"
+echo "Note: Two services available:"
+echo "  - piview.service (Python-based, factory-hardened)"
+echo "  - kiosk.service (Simple bash script, from instructions)"
 
 # Disable sleep/suspend (Pi only)
 if [ "$IS_PI" = true ]; then
@@ -488,10 +636,16 @@ echo "URL: $USER_URL"
 echo "Health: http://$(hostname -I | awk '{print $1}'):$HEALTH_PORT/health"
 echo ""
 echo "Commands:"
-echo "  sudo systemctl start piview   - Start now"
-echo "  sudo /opt/piview/restart.sh   - Restart"
+echo "  sudo systemctl start piview   - Start now (Python-based)"
+echo "  sudo systemctl start kiosk    - Start now (Simple bash)"
+echo "  sudo /opt/piview/restart.sh   - Restart piview"
 echo "  sudo /opt/piview/status.sh    - Check status"
 echo "  sudo /opt/piview/logs.sh      - View live logs"
+echo ""
+echo "Service management:"
+echo "  sudo systemctl status kiosk.service  - Check kiosk status"
+echo "  sudo systemctl stop kiosk.service    - Stop kiosk"
+echo "  sudo systemctl disable kiosk.service  - Disable kiosk"
 echo ""
 echo "Factory Features:"
 echo "  ✓ Watchdog (${WATCHDOG_THRESHOLD}s freeze threshold)"
@@ -499,6 +653,12 @@ echo "  ✓ Auto-reboot (after $AUTO_REBOOT_FAILURES failures)"
 echo "  ✓ Memory monitoring (${MEMORY_LIMIT}MB limit)"
 echo "  ✓ Health endpoint (port $HEALTH_PORT)"
 echo "  ✓ Infinite restarts"
+echo ""
+echo "Troubleshooting:"
+echo "  If Chromium won't start, run: /opt/piview/fix-chromium.sh"
+echo "  To update Chromium if blocked:"
+echo "    sudo apt update --allow-releaseinfo-change"
+echo "    sudo apt-get upgrade"
 echo ""
 
 # Offer to start
