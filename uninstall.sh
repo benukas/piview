@@ -97,9 +97,8 @@ fi
 
 # Remove configuration files (optional - ask user)
 echo ""
-read -p "Remove configuration files? (/etc/piview/config.json) (y/n) " -n 1 -r
-echo
-if [[ $REPLY =~ ^[Yy]$ ]]; then
+ask_tty_yn "Remove configuration files? (/etc/piview/config.json)" REMOVE_CONFIG "n"
+if [[ $REMOVE_CONFIG =~ ^[Yy]$ ]]; then
     if [ -d /etc/piview ]; then
         sudo rm -rf /etc/piview
         echo "Configuration files removed."
@@ -110,9 +109,8 @@ fi
 
 # Remove log files (optional - ask user)
 echo ""
-read -p "Remove log files? (/var/log/piview.log) (y/n) " -n 1 -r
-echo
-if [[ $REPLY =~ ^[Yy]$ ]]; then
+ask_tty_yn "Remove log files? (/var/log/piview.log)" REMOVE_LOGS "n"
+if [[ $REMOVE_LOGS =~ ^[Yy]$ ]]; then
     sudo rm -f /var/log/piview.log 2>/dev/null || true
     echo "Log files removed."
 else
