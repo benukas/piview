@@ -1,20 +1,16 @@
 #!/bin/bash
-# Piview - One-shot setup script for Raspberry Pi OS Lite
-# Sets up kiosk mode with read-only SD card, NTP sync, and auto-start
-# Pipe-safe: Works even when piped via curl | bash
+# Piview Factory-Hardened Setup Script
+# Bulletproof installation for 24/7 industrial deployment
 
 set -e
 
-# Helper function to ask questions that work even when piped
+# Helper functions for piped input
 ask_tty() {
     local prompt_text=$1
     local var_name=$2
     local default_val=$3
     
-    # Send prompt to stderr (screen) so it shows even when piped
     echo -n "$prompt_text [$default_val]: " >&2
-    
-    # Read from terminal, not from pipe
     read -r response </dev/tty 2>/dev/null || response="$default_val"
     
     if [ -z "$response" ]; then
@@ -40,662 +36,231 @@ ask_tty_yn() {
     eval "$var_name=\"$response\""
 }
 
-echo "=========================================="
-echo "Piview - Pi OS Lite Setup"
-echo "=========================================="
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+if [ "$EUID" -eq 0 ]; then 
+   echo -e "${RED}ERROR: Do not run as root${NC}"
+   exit 1
+fi
+
+echo ""
+echo "=========================================================="
+echo "Piview Factory-Hardened Setup"
+echo "=========================================================="
 echo ""
 
-# Check if read-only mode is enabled - must be disabled for installation
-echo "Checking filesystem write protection..."
-ROOT=$(findmnt -n -o OPTIONS / 2>/dev/null | grep -o ro || echo "")
-BOOT=$(findmnt -n -o OPTIONS /boot 2>/dev/null | grep -o ro || echo "")
-
-if [ -n "$ROOT" ] || [ -n "$BOOT" ]; then
-    echo ""
-    echo "⚠️  ERROR: Read-only filesystem is ENABLED (currently mounted as read-only)"
-    echo ""
-    echo "Installation cannot proceed with read-only mode enabled."
-    echo "Please disable it first:"
-    echo ""
-    echo "  1. Run: sudo overlayroot.sh disable (if available)"
-    echo "  2. Or use raspi-config: Advanced Options > Overlay Filesystem > Disable"
-    echo "  3. Reboot: sudo reboot"
-    echo "  4. Run this installer again after reboot"
-    echo ""
+# Check filesystem is writable
+ROOT_RO=$(findmnt -n -o OPTIONS / 2>/dev/null | grep -o ro || echo "")
+if [ -n "$ROOT_RO" ]; then
+    echo -e "${RED}ERROR: Filesystem is read-only${NC}"
+    echo "Disable with: sudo overlayroot.sh disable"
     exit 1
 fi
 
-# Filesystem is writable - check for leftover flags in config files and clean them up
-CLEANED_FLAGS=false
+echo -e "${GREEN}✓ Filesystem is writable${NC}"
 
-# Check and clean cmdline.txt
-if [ -f /boot/cmdline.txt ] && grep -q "fastboot noswap" /boot/cmdline.txt 2>/dev/null; then
-    echo "Found leftover read-only flags in /boot/cmdline.txt (cleaning up)..."
-    if [ -f /boot/cmdline.txt.backup ]; then
-        sudo cp /boot/cmdline.txt.backup /boot/cmdline.txt
-    else
-        sudo sed -i 's/ fastboot noswap//' /boot/cmdline.txt 2>/dev/null || true
-    fi
-    CLEANED_FLAGS=true
+# Check required files
+if [ ! -f piview.py ]; then
+    echo -e "${RED}ERROR: piview.py not found${NC}"
+    exit 1
 fi
 
-# Check and clean fstab
-if [ -f /etc/fstab ] && grep -q "defaults,ro" /etc/fstab 2>/dev/null; then
-    echo "Found leftover read-only flags in /etc/fstab (cleaning up)..."
-    if [ -f /etc/fstab.backup ]; then
-        sudo cp /etc/fstab.backup /etc/fstab
-    else
-        sudo sed -i 's/vfat defaults,ro/vfat defaults/' /etc/fstab 2>/dev/null || true
-        sudo sed -i 's/ext4 defaults,ro/ext4 defaults/' /etc/fstab 2>/dev/null || true
-    fi
-    CLEANED_FLAGS=true
-fi
-
-if [ "$CLEANED_FLAGS" = true ]; then
-    echo "✓ Cleaned up leftover read-only flags from config files"
-    echo ""
-fi
-
-echo "✓ Filesystem is writable - installation can proceed"
-echo ""
-
-# Check if running on Raspberry Pi or VirtualBox
-IS_RASPBERRY_PI=false
-IS_VIRTUALBOX=false
+# Detect platform
+IS_PI=false
+IS_VBOX=false
 
 if [ -f /proc/device-tree/model ] && grep -q "Raspberry Pi" /proc/device-tree/model 2>/dev/null; then
-    IS_RASPBERRY_PI=true
-    echo "Detected: Raspberry Pi hardware"
-elif [ -f /sys/class/dmi/id/product_name ] && grep -qi "virtualbox" /sys/class/dmi/id/product_name 2>/dev/null; then
-    IS_VIRTUALBOX=true
-    echo "Detected: VirtualBox virtual machine"
-    echo "Note: This setup is designed for Raspberry Pi, but will work in VirtualBox for testing."
-elif [ -f /sys/class/dmi/id/sys_vendor ] && grep -qi "virtualbox" /sys/class/dmi/id/sys_vendor 2>/dev/null; then
-    IS_VIRTUALBOX=true
-    echo "Detected: VirtualBox virtual machine"
-    echo "Note: This setup is designed for Raspberry Pi, but will work in VirtualBox for testing."
+    IS_PI=true
+    echo "Platform: Raspberry Pi"
+elif grep -qi "virtualbox" /sys/class/dmi/id/* 2>/dev/null; then
+    IS_VBOX=true
+    echo "Platform: VirtualBox (testing)"
 else
-    echo "Warning: This doesn't appear to be a Raspberry Pi or VirtualBox"
-    echo "Some features may not work correctly on this system."
-    ask_tty_yn "Continue anyway?" CONTINUE_REPLY "y"
+    echo -e "${YELLOW}Warning: Not a Raspberry Pi${NC}"
+    exec < /dev/tty
+    read -p "Continue? (y/N): " -n 1 -r
     echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        exit 1
-    fi
+    [[ ! $REPLY =~ ^[Yy]$ ]] && exit 1
 fi
 
-# WiFi Configuration (skip on VirtualBox)
+# Detect user
+ACTUAL_USER="${USER:-pi}"
+if [ -z "$ACTUAL_USER" ] || [ "$ACTUAL_USER" = "root" ]; then
+    ACTUAL_USER=$(getent passwd | awk -F: '$3 >= 1000 && $1 != "nobody" {print $1; exit}' || echo "pi")
+fi
+echo "Installing for user: $ACTUAL_USER"
+
+# Update packages
 echo ""
-echo "=========================================="
-echo "WiFi Configuration"
-echo "=========================================="
-echo ""
-if [ "$IS_VIRTUALBOX" = true ]; then
-    echo "Skipping WiFi configuration (VirtualBox uses host network)" >&2
-    ask_tty_yn "Configure WiFi anyway?" CONFIGURE_WIFI "n"
-else
-    ask_tty_yn "Configure WiFi?" CONFIGURE_WIFI "n"
-fi
-
-if [[ $CONFIGURE_WIFI =~ ^[Yy]$ ]]; then
-    # Install WiFi tools if not already installed
-    echo "Installing WiFi configuration tools..."
-    sudo apt-get install -y wpasupplicant wireless-tools || true
-    
-    # Get WiFi SSID
-    echo "" >&2
-    ask_tty "Enter WiFi SSID (network name)" WIFI_SSID ""
-    if [ -z "$WIFI_SSID" ]; then
-        echo "No SSID provided, skipping WiFi configuration." >&2
-    else
-        # Ask if password protected
-        echo "" >&2
-        ask_tty_yn "Is this network password protected? (WPA2)" WIFI_PASS_REPLY "y"
-        
-        # Backup existing wpa_supplicant.conf
-        if [ -f /etc/wpa_supplicant/wpa_supplicant.conf ]; then
-            sudo cp /etc/wpa_supplicant/wpa_supplicant.conf /etc/wpa_supplicant/wpa_supplicant.conf.backup
-        fi
-        
-        if [[ $WIFI_PASS_REPLY =~ ^[Yy]$ ]]; then
-            # WPA2 network - get password (hidden)
-            echo -n "Enter WiFi password: " >&2
-            stty -echo </dev/tty 2>/dev/null || true
-            read -r WIFI_PASSWORD </dev/tty 2>/dev/null || WIFI_PASSWORD=""
-            stty echo </dev/tty 2>/dev/null || true
-            echo "" >&2
-            
-            # Generate PSK if wpa_passphrase is available
-            if command -v wpa_passphrase &> /dev/null; then
-                # wpa_passphrase outputs psk=... on a line, extract it
-                WIFI_PSK=$(wpa_passphrase "$WIFI_SSID" "$WIFI_PASSWORD" 2>/dev/null | grep "psk=" | grep -v "#" | cut -d= -f2 | tr -d ' ')
-            else
-                # Fallback: use password in quotes (wpa_supplicant will hash it)
-                WIFI_PSK="\"$WIFI_PASSWORD\""
-            fi
-            
-            # Ask for country code (required for WiFi on Pi)
-            ask_tty "Enter country code (e.g., US, GB, DE)" COUNTRY_CODE "US"
-            
-            # Configure wpa_supplicant.conf
-            echo "Configuring WiFi (WPA2)..."
-            sudo tee /etc/wpa_supplicant/wpa_supplicant.conf > /dev/null << WPAEOF
-ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
-update_config=1
-country=$COUNTRY_CODE
-
-network={
-    ssid="$WIFI_SSID"
-    psk=$WIFI_PSK
-    key_mgmt=WPA-PSK
-}
-WPAEOF
-        else
-            # Open network (no password)
-            ask_tty "Enter country code (e.g., US, GB, DE)" COUNTRY_CODE "US"
-            
-            echo "Configuring WiFi (open network)..."
-            sudo tee /etc/wpa_supplicant/wpa_supplicant.conf > /dev/null << WPAEOF
-ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
-update_config=1
-country=$COUNTRY_CODE
-
-network={
-    ssid="$WIFI_SSID"
-    key_mgmt=NONE
-}
-WPAEOF
-        fi
-        
-        # Set proper permissions
-        sudo chmod 600 /etc/wpa_supplicant/wpa_supplicant.conf
-        
-        # Enable and start wpa_supplicant
-        echo "Enabling WiFi..."
-        sudo systemctl enable wpa_supplicant 2>/dev/null || true
-        sudo systemctl start wpa_supplicant 2>/dev/null || true
-        
-        # Find WiFi interface (handle both wlan0 and predictable names)
-        WIFI_INTERFACE=""
-        if [ -d /sys/class/net ]; then
-            # Try wlan0 first (legacy)
-            if [ -d /sys/class/net/wlan0 ]; then
-                WIFI_INTERFACE="wlan0"
-            else
-                # Try predictable names (wlan*, wlp*, etc.)
-                for iface in /sys/class/net/wlan* /sys/class/net/wlp*; do
-                    if [ -d "$iface" ]; then
-                        WIFI_INTERFACE=$(basename "$iface")
-                        break
-                    fi
-                done
-            fi
-        fi
-        
-        # Restart network interface if found
-        if [ -n "$WIFI_INTERFACE" ]; then
-            echo "Restarting network interface: $WIFI_INTERFACE"
-            sudo ifdown "$WIFI_INTERFACE" 2>/dev/null || true
-            sleep 2
-            sudo ifup "$WIFI_INTERFACE" 2>/dev/null || true
-        else
-            echo "Warning: Could not detect WiFi interface. You may need to restart networking manually."
-        fi
-        
-        # Wait for connection
-        echo "Waiting for WiFi connection..."
-        sleep 5
-        
-        # Check connection
-        if ping -c 1 -W 5 8.8.8.8 &>/dev/null; then
-            echo "WiFi connected successfully!"
-        else
-            echo "Warning: WiFi may not be connected. Check configuration manually."
-            if [ -n "$WIFI_INTERFACE" ]; then
-                echo "You can check status with: sudo iwconfig $WIFI_INTERFACE"
-            else
-                echo "You can check WiFi status with: sudo iwconfig"
-            fi
-        fi
-    fi
-else
-    echo "Skipping WiFi configuration. Using existing network setup."
-fi
-
-# Ask about updating package lists (optional - can skip if lists are recent)
-echo "" >&2
-ask_tty_yn "Update package lists? (recommended, but can skip if recently updated)" UPDATE_REPLY "y"
-if [[ $UPDATE_REPLY =~ ^[Yy]$ ]] || [ -z "$UPDATE_REPLY" ]; then
-    echo ""
+exec < /dev/tty
+ask_tty_yn "Update package lists?" UPDATE_REPLY "y"
+if [[ $UPDATE_REPLY =~ ^[Yy]$ ]]; then
     echo "Updating package lists..."
-    echo "This may take a few minutes on first run..."
-    sudo apt-get update
-else
-    echo "Skipping package list update"
-fi
-
-# Ask about upgrading packages (optional - some orgs prefer install-only)
-echo "" >&2
-ask_tty_yn "Upgrade all installed packages? (recommended, but some orgs prefer install-only)" UPGRADE_REPLY "n"
-if [[ $UPGRADE_REPLY =~ ^[Yy]$ ]]; then
-    echo "Upgrading system packages..."
-    sudo apt-get upgrade -y
-else
-    echo "Skipping package upgrades (install-only mode)"
-fi
-
-# Configure network failover (LAN priority with WiFi fallback)
-echo "" >&2
-ask_tty_yn "Would you like to setup network failover? (if LAN goes down, switch to WiFi)" FAILOVER_REPLY "n"
-
-FAILOVER_WIFI_SSID=""
-FAILOVER_WIFI_PASSWORD=""
-FAILOVER_WIFI_INTERFACE=""
-
-if [[ $FAILOVER_REPLY =~ ^[Yy]$ ]]; then
-    echo "" >&2
-    ask_tty "Enter WiFi SSID for failover (network name)" FAILOVER_WIFI_SSID ""
-    
-    if [ -n "$FAILOVER_WIFI_SSID" ]; then
-        # Ask if password protected
-        echo "" >&2
-        ask_tty_yn "Is this failover network password protected? (WPA2)" FAILOVER_PASS_REPLY "y"
-        
-        if [[ $FAILOVER_PASS_REPLY =~ ^[Yy]$ ]]; then
-            # Get password (hidden)
-            echo -n "Enter WiFi password: " >&2
-            stty -echo </dev/tty 2>/dev/null || true
-            read -r FAILOVER_WIFI_PASSWORD </dev/tty 2>/dev/null || FAILOVER_WIFI_PASSWORD=""
-            stty echo </dev/tty 2>/dev/null || true
-            echo "" >&2
-        fi
-        
-        # Configure failover WiFi network in wpa_supplicant
-        echo "Configuring failover WiFi network..."
-        
-        # Backup existing wpa_supplicant.conf if not already backed up
-        if [ ! -f /etc/wpa_supplicant/wpa_supplicant.conf.backup ] && [ -f /etc/wpa_supplicant/wpa_supplicant.conf ]; then
-            sudo cp /etc/wpa_supplicant/wpa_supplicant.conf /etc/wpa_supplicant/wpa_supplicant.conf.backup
-        fi
-        
-        # Read existing config or create new
-        if [ -f /etc/wpa_supplicant/wpa_supplicant.conf ]; then
-            # Append failover network to existing config
-            if [[ $FAILOVER_PASS_REPLY =~ ^[Yy]$ ]]; then
-                # Generate PSK
-                if command -v wpa_passphrase &> /dev/null; then
-                    FAILOVER_PSK=$(wpa_passphrase "$FAILOVER_WIFI_SSID" "$FAILOVER_WIFI_PASSWORD" 2>/dev/null | grep "psk=" | grep -v "#" | cut -d= -f2 | tr -d ' ')
-                else
-                    FAILOVER_PSK="\"$FAILOVER_WIFI_PASSWORD\""
-                fi
-                
-                echo "" | sudo tee -a /etc/wpa_supplicant/wpa_supplicant.conf > /dev/null
-                sudo tee -a /etc/wpa_supplicant/wpa_supplicant.conf > /dev/null << WPAFAILOVER
-network={
-    ssid="$FAILOVER_WIFI_SSID"
-    psk=$FAILOVER_PSK
-    key_mgmt=WPA-PSK
-    priority=5
-}
-WPAFAILOVER
-            else
-                echo "" | sudo tee -a /etc/wpa_supplicant/wpa_supplicant.conf > /dev/null
-                sudo tee -a /etc/wpa_supplicant/wpa_supplicant.conf > /dev/null << WPAFAILOVER
-network={
-    ssid="$FAILOVER_WIFI_SSID"
-    key_mgmt=NONE
-    priority=5
-}
-WPAFAILOVER
-            fi
-        else
-            # Create new config with failover network
-            ask_tty "Enter country code (e.g., US, GB, DE)" COUNTRY_CODE "US"
-            
-            if [[ $FAILOVER_PASS_REPLY =~ ^[Yy]$ ]]; then
-                if command -v wpa_passphrase &> /dev/null; then
-                    FAILOVER_PSK=$(wpa_passphrase "$FAILOVER_WIFI_SSID" "$FAILOVER_WIFI_PASSWORD" 2>/dev/null | grep "psk=" | grep -v "#" | cut -d= -f2 | tr -d ' ')
-                else
-                    FAILOVER_PSK="\"$FAILOVER_WIFI_PASSWORD\""
-                fi
-                
-                sudo tee /etc/wpa_supplicant/wpa_supplicant.conf > /dev/null << WPAFAILOVER
-ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
-update_config=1
-country=$COUNTRY_CODE
-
-network={
-    ssid="$FAILOVER_WIFI_SSID"
-    psk=$FAILOVER_PSK
-    key_mgmt=WPA-PSK
-    priority=5
-}
-WPAFAILOVER
-            else
-                sudo tee /etc/wpa_supplicant/wpa_supplicant.conf > /dev/null << WPAFAILOVER
-ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
-update_config=1
-country=$COUNTRY_CODE
-
-network={
-    ssid="$FAILOVER_WIFI_SSID"
-    key_mgmt=NONE
-    priority=5
-}
-WPAFAILOVER
-            fi
-        fi
-        
-        sudo chmod 600 /etc/wpa_supplicant/wpa_supplicant.conf
-        
-        # Find WiFi interface
-        if [ -d /sys/class/net/wlan0 ]; then
-            FAILOVER_WIFI_INTERFACE="wlan0"
-        else
-            for iface in /sys/class/net/wlan* /sys/class/net/wlp*; do
-                if [ -d "$iface" ]; then
-                    FAILOVER_WIFI_INTERFACE=$(basename "$iface")
-                    break
-                fi
-            done
-        fi
-        
-        # Configure network priorities
-        if command -v nmcli &> /dev/null; then
-            # NetworkManager is available - set up metrics for failover
-            ETH_INTERFACE=""
-            
-            # Find ethernet interface
-            if [ -d /sys/class/net/eth0 ]; then
-                ETH_INTERFACE="eth0"
-            else
-                for iface in /sys/class/net/eth* /sys/class/net/en*; do
-                    if [ -d "$iface" ]; then
-                        ETH_INTERFACE=$(basename "$iface")
-                        break
-                    fi
-                done
-            fi
-            
-            # Configure metrics if interfaces found
-            if [ -n "$ETH_INTERFACE" ]; then
-                # Set Ethernet to higher priority (lower metric = higher priority)
-                ETH_CONN=$(nmcli -t -f NAME,DEVICE connection show | grep "$ETH_INTERFACE" | cut -d: -f1 | head -1)
-                if [ -n "$ETH_CONN" ]; then
-                    sudo nmcli connection modify "$ETH_CONN" ipv4.route-metric 100 2>/dev/null || true
-                    echo "  ✓ Ethernet ($ETH_INTERFACE) set to priority 1 (metric 100)"
-                fi
-            fi
-            
-            if [ -n "$FAILOVER_WIFI_INTERFACE" ]; then
-                # Set WiFi to lower priority (higher metric = lower priority)
-                WIFI_CONN=$(nmcli -t -f NAME,DEVICE connection show | grep "$FAILOVER_WIFI_INTERFACE" | cut -d: -f1 | head -1)
-                if [ -n "$WIFI_CONN" ]; then
-                    sudo nmcli connection modify "$WIFI_CONN" ipv4.route-metric 200 2>/dev/null || true
-                    echo "  ✓ WiFi ($FAILOVER_WIFI_INTERFACE) set to priority 2 (metric 200)"
-                fi
-            fi
-            
-            echo "  ✓ Network failover configured: LAN preferred, WiFi ($FAILOVER_WIFI_SSID) fallback"
-        else
-            echo "  ✓ Network failover configured: LAN preferred, WiFi ($FAILOVER_WIFI_SSID) fallback"
-            echo "  Note: NetworkManager not available, failover handled by Piview's health check"
-        fi
-        
-        # Save failover WiFi info to config for Piview
-        FAILOVER_CONFIG="{\"failover_wifi_ssid\": \"$FAILOVER_WIFI_SSID\", \"failover_wifi_interface\": \"$FAILOVER_WIFI_INTERFACE\"}"
-    else
-        echo "No WiFi SSID provided, skipping network failover configuration." >&2
-    fi
-else
-    echo "Skipping network failover configuration."
+    sudo apt-get update -qq
 fi
 
 # Install dependencies
+echo ""
 echo "Installing dependencies..."
-# Check if we're on Raspberry Pi Desktop (has GUI) or Lite (needs X server)
+
+PACKAGES=(
+    "chromium-browser"
+    "python3"
+    "python3-pip"
+    "python3-psutil"
+    "xserver-xorg"
+    "xinit"
+    "x11-xserver-utils"
+    "xdotool"
+    "unclutter"
+    "ca-certificates"
+    "libnss3-tools"
+)
+
+# Check if we need X server (Lite vs Desktop)
 if [ -n "$DISPLAY" ] || [ -d /usr/share/X11 ]; then
-    echo "Detected: Desktop environment (Raspberry Pi Desktop)"
-    NEED_X_SERVER=false
-else
-    echo "Detected: Lite/headless (needs X server)"
-    NEED_X_SERVER=true
+    echo "Desktop environment detected"
+    # Remove xserver-xorg, xinit from list (already installed)
+    PACKAGES=("${PACKAGES[@]/xserver-xorg/}")
+    PACKAGES=("${PACKAGES[@]/xinit/}")
 fi
 
-# Check if browser is already installed
-BROWSER_INSTALLED=false
-if command -v chromium-browser >/dev/null 2>&1 || command -v chromium >/dev/null 2>&1; then
-    BROWSER_INSTALLED=true
-    echo "Chromium browser already installed"
-fi
+echo "Installing: ${PACKAGES[@]}"
+sudo apt-get install -y "${PACKAGES[@]}" 2>&1 | grep -v "is already the newest version" || true
 
-# Determine which browser package to install (if needed)
-if [ "$BROWSER_INSTALLED" = false ]; then
-    # Check which package is available
-    if apt-cache search chromium-browser 2>/dev/null | grep -q "^chromium-browser "; then
-        BROWSER_PKG="chromium-browser"
-    elif apt-cache search chromium 2>/dev/null | grep -q "^chromium "; then
-        BROWSER_PKG="chromium"
-    else
-        # Try both
-        BROWSER_PKG="chromium-browser"
-    fi
-else
-    BROWSER_PKG=""
-fi
-
-if [ "$NEED_X_SERVER" = true ]; then
-    PACKAGES="xserver-xorg xinit x11-xserver-utils xdotool unclutter python3 python3-pip python3-psutil watchdog"
-    if [ -n "$BROWSER_PKG" ]; then
-        PACKAGES="$BROWSER_PKG $PACKAGES"
-    fi
-    sudo apt-get install -y $PACKAGES || true
-else
-    # Desktop already has X server, just install browser and tools
-    PACKAGES="xdotool unclutter python3 python3-pip python3-psutil watchdog"
-    if [ -n "$BROWSER_PKG" ]; then
-        PACKAGES="$BROWSER_PKG $PACKAGES"
-    fi
-    sudo apt-get install -y $PACKAGES || true
-fi
-
-# Install psutil via pip if apt package not available (fallback)
+# Verify psutil
 if ! python3 -c "import psutil" 2>/dev/null; then
     echo "Installing psutil via pip..."
-    sudo pip3 install psutil || true
+    sudo pip3 install psutil --break-system-packages 2>/dev/null || sudo pip3 install psutil
 fi
 
-# Install certificate tools (for SSL certificate installation)
-sudo apt-get install -y ca-certificates libnss3-tools || true
+echo -e "${GREEN}✓ Dependencies installed${NC}"
 
-# Final verification - browser should be available
-if ! command -v chromium-browser >/dev/null 2>&1 && ! command -v chromium >/dev/null 2>&1; then
-    echo "Warning: Chromium browser executable not found in PATH"
-    echo "Trying alternative installation methods..."
-    sudo apt-get install -y chromium-browser 2>/dev/null || \
-    sudo apt-get install -y chromium 2>/dev/null || \
-    echo "Note: Please ensure Chromium is installed manually if needed"
-fi
-
-# Sync time immediately
-echo "Syncing time with NTP..."
-# Check which time sync service is available
-if systemctl list-unit-files | grep -q "^ntp.service"; then
-    # Traditional NTP service
-    sudo systemctl stop ntp 2>/dev/null || true
-    if command -v ntpdate &> /dev/null; then
-        sudo ntpdate -s time.nist.gov || sudo ntpdate -s pool.ntp.org || true
-    fi
-    sudo systemctl start ntp 2>/dev/null || true
-    sudo systemctl enable ntp 2>/dev/null || true
-elif systemctl list-unit-files | grep -q "^systemd-timesyncd.service"; then
-    # systemd-timesyncd (modern default)
-    sudo systemctl stop systemd-timesyncd 2>/dev/null || true
-    sudo timedatectl set-ntp true
-    sudo systemctl start systemd-timesyncd 2>/dev/null || true
+# Time sync
+echo ""
+echo "Configuring time sync..."
+if systemctl list-unit-files | grep -q "systemd-timesyncd"; then
     sudo systemctl enable systemd-timesyncd 2>/dev/null || true
-    # Force sync
-    sudo timedatectl set-time "$(date -u +%Y-%m-%d\ %H:%M:%S)" 2>/dev/null || true
-elif command -v chronyd &> /dev/null; then
-    # Chrony
-    sudo systemctl stop chronyd 2>/dev/null || true
-    sudo chronyd -q 2>/dev/null || true
-    sudo systemctl start chronyd 2>/dev/null || true
-    sudo systemctl enable chronyd 2>/dev/null || true
+    sudo systemctl start systemd-timesyncd 2>/dev/null || true
+    sudo timedatectl set-ntp true 2>/dev/null || true
 else
-    # Fallback: try to install and use ntpdate
-    echo "No time sync service found, installing NTP..."
-    sudo apt-get install -y ntp ntpdate || true
-    if command -v ntpdate &> /dev/null; then
-        sudo ntpdate -s time.nist.gov || sudo ntpdate -s pool.ntp.org || true
-    fi
-    if systemctl list-unit-files | grep -q "^ntp.service"; then
-        sudo systemctl start ntp 2>/dev/null || true
-        sudo systemctl enable ntp 2>/dev/null || true
-    fi
+    sudo apt-get install -y ntp 2>/dev/null || true
+    sudo systemctl enable ntp 2>/dev/null || true
 fi
+echo "Current time: $(date)"
 
-# Verify time sync is working
-echo "Time sync configured. Current time: $(date)"
-
-# Create application directory
+# Create directories
+echo ""
+echo "Creating directories..."
 APP_DIR="/opt/piview"
-echo "Creating application directory at $APP_DIR..."
-sudo mkdir -p $APP_DIR
-sudo cp piview.py $APP_DIR/
-sudo chmod +x $APP_DIR/piview.py
+CONFIG_DIR="$HOME/.piview"
 
-# Create config directory
-CONFIG_DIR="/etc/piview"
-sudo mkdir -p $CONFIG_DIR
+sudo mkdir -p "$APP_DIR"
+mkdir -p "$CONFIG_DIR"
 
-# Configuration prompts
-echo "" >&2
-echo "==========================================" >&2
-echo "Configuration" >&2
-echo "==========================================" >&2
-echo "" >&2
+# Install piview.py
+sudo cp piview.py "$APP_DIR/"
+sudo chmod +x "$APP_DIR/piview.py"
+sudo chown -R "$ACTUAL_USER:$ACTUAL_USER" "$APP_DIR"
 
-# Get URL from user or use default
-ask_tty "Enter the URL to display" USER_URL "http://example.com"
+echo -e "${GREEN}✓ Files installed to $APP_DIR${NC}"
 
-# Get refresh interval
-ask_tty "Enter refresh interval (seconds)" REFRESH_INTERVAL "60"
+# Configuration
+echo ""
+echo "=========================================================="
+echo "Configuration"
+echo "=========================================================="
+echo ""
 
-# Ask about SSL certificate handling
-echo "" >&2
-echo "SSL Certificate Options:" >&2
-echo "  1) Install certificate file (recommended - most secure)" >&2
-echo "  2) Ignore SSL errors (for testing/development)" >&2
-echo "  3) Use system defaults (no special handling)" >&2
-ask_tty "Choose option (1/2/3)" SSL_OPTION "2"
+exec < /dev/tty
+ask_tty "Dashboard URL" USER_URL "http://example.com"
+ask_tty "Refresh interval (seconds)" REFRESH_INTERVAL "60"
+
+# SSL handling
+echo ""
+echo "SSL Options:"
+echo "  1) Ignore SSL errors (testing/self-signed certs)"
+echo "  2) Use system certificates (production)"
+ask_tty "Choose (1/2)" SSL_OPTION "1"
 
 if [[ $SSL_OPTION == "1" ]]; then
-    IGNORE_SSL="false"
-    echo "" >&2
-    ask_tty "Enter path to certificate file (.crt or .pem)" CERT_PATH ""
-    
-    if [ -n "$CERT_PATH" ] && [ -f "$CERT_PATH" ]; then
-        echo "Installing certificate..." >&2
-        # Install certificate to system store
-        sudo cp "$CERT_PATH" /usr/local/share/ca-certificates/piview-custom.crt
-        sudo update-ca-certificates
-        
-        # Also install to Chromium's certificate store
-        CERT_DIR="$HOME/.pki/nssdb"
-        mkdir -p "$CERT_DIR"
-        
-        # Use certutil if available (part of libnss3-tools)
-        if command -v certutil &> /dev/null; then
-            certutil -d "sql:$CERT_DIR" -A -t "C,," -n "Piview Custom Cert" -i "$CERT_PATH" 2>/dev/null || true
-        else
-            echo "Installing certutil for certificate management..." >&2
-            sudo apt-get install -y libnss3-tools || true
-            if command -v certutil &> /dev/null; then
-                certutil -d "sql:$CERT_DIR" -A -t "C,," -n "Piview Custom Cert" -i "$CERT_PATH" 2>/dev/null || true
-            fi
-        fi
-        
-        echo "Certificate installed successfully!" >&2
-        CERT_INSTALLED="true"
-    else
-        echo "Certificate file not found, falling back to ignore SSL errors" >&2
-        IGNORE_SSL="true"
-        CERT_INSTALLED="false"
-    fi
-elif [[ $SSL_OPTION == "2" ]]; then
     IGNORE_SSL="true"
     CERT_INSTALLED="false"
 else
     IGNORE_SSL="false"
     CERT_INSTALLED="false"
 fi
-echo "" >&2
 
-# Build failover config JSON if configured (must be before config file creation)
-if [ -n "$FAILOVER_WIFI_SSID" ]; then
-    FAILOVER_JSON=",
-  \"network_failover_enabled\": true,
-  \"failover_wifi_ssid\": \"$FAILOVER_WIFI_SSID\",
-  \"failover_wifi_interface\": \"${FAILOVER_WIFI_INTERFACE:-wlan0}\""
-else
-    FAILOVER_JSON=",
-  \"network_failover_enabled\": false"
-fi
+# Factory settings
+echo ""
+echo "Factory Settings:"
+ask_tty "Watchdog freeze threshold (seconds)" WATCHDOG_THRESHOLD "120"
+ask_tty "Auto-reboot after failures" AUTO_REBOOT_FAILURES "20"
+ask_tty "Memory limit (MB)" MEMORY_LIMIT "1500"
+ask_tty "Health endpoint port" HEALTH_PORT "8888"
 
-# Create config file
+# Create config
+echo ""
 echo "Creating configuration..."
-sudo tee $CONFIG_DIR/config.json > /dev/null << EOF
+cat > "$CONFIG_DIR/config.json" << EOF
 {
   "url": "$USER_URL",
   "refresh_interval": $REFRESH_INTERVAL,
   "browser": "chromium-browser",
+  "health_check_interval": 10,
+  "max_browser_restarts": 10,
   "ignore_ssl_errors": $IGNORE_SSL,
-  "cert_installed": ${CERT_INSTALLED:-false},
+  "cert_installed": $CERT_INSTALLED,
   "connection_retry_delay": 5,
-  "max_connection_retries": 3$FAILOVER_JSON,
+  "max_connection_retries": 3,
+  "watchdog_enabled": true,
+  "watchdog_freeze_threshold": $WATCHDOG_THRESHOLD,
+  "auto_reboot_enabled": true,
+  "auto_reboot_after_failures": $AUTO_REBOOT_FAILURES,
+  "memory_limit_mb": $MEMORY_LIMIT,
+  "disk_space_warning_mb": 500,
+  "log_rotation_size_mb": 10,
+  "health_endpoint_port": $HEALTH_PORT,
   "kiosk_flags": [
     "--kiosk",
     "--noerrdialogs",
     "--disable-infobars",
     "--disable-session-crashed-bubble",
-    "--disable-restore-session-state",
-    "--disable-sync",
-    "--disable-dev-shm-usage",
     "--no-sandbox",
+    "--disable-dev-shm-usage",
     "--disable-gpu",
-    "--user-data-dir=/tmp/chromium-ssl-bypass"
+    "--user-data-dir=/tmp/chromium-piview"
   ]
 }
 EOF
 
-# Copy utility scripts
-echo "Installing utility scripts..."
-sudo cp close_browser.sh $APP_DIR/ 2>/dev/null || true
-sudo cp screen_keepalive.sh $APP_DIR/ 2>/dev/null || true
-sudo cp export_logs.sh $APP_DIR/ 2>/dev/null || true
+echo -e "${GREEN}✓ Config: $CONFIG_DIR/config.json${NC}"
 
-# Create factory helper scripts
-echo "Creating factory helper scripts..."
-sudo tee $APP_DIR/restart.sh > /dev/null << 'EOF'
+# Create helper scripts
+echo ""
+echo "Creating helper scripts..."
+
+cat > "$APP_DIR/restart.sh" << 'EOF'
 #!/bin/bash
-# Quick restart script
 sudo systemctl restart piview.service
 echo "Piview restarted"
 EOF
 
-sudo tee $APP_DIR/stop.sh > /dev/null << 'EOF'
+cat > "$APP_DIR/stop.sh" << 'EOF'
 #!/bin/bash
-# Stop script
 sudo systemctl stop piview.service
 pkill -9 chromium 2>/dev/null || true
 pkill -9 chromium-browser 2>/dev/null || true
 echo "Piview stopped"
 EOF
 
-sudo tee $APP_DIR/status.sh > /dev/null << 'EOF'
+cat > "$APP_DIR/status.sh" << 'EOF'
 #!/bin/bash
-# Status check script
 echo "=== Service Status ==="
 sudo systemctl status piview.service --no-pager -l
 echo ""
@@ -703,156 +268,168 @@ echo "=== Health Status ==="
 if [ -f /tmp/piview_health.json ]; then
     cat /tmp/piview_health.json | python3 -m json.tool 2>/dev/null || cat /tmp/piview_health.json
 else
-    echo "Health file not found (service may not be running)"
+    echo "Health file not found"
 fi
 echo ""
 echo "=== Recent Logs ==="
 sudo journalctl -u piview.service -n 20 --no-pager
 EOF
 
-sudo chmod +x $APP_DIR/*.sh 2>/dev/null || true
+cat > "$APP_DIR/logs.sh" << 'EOF'
+#!/bin/bash
+# View live logs
+sudo journalctl -u piview.service -f
+EOF
 
-# Create symlink for easy access to export logs
-sudo ln -sf $APP_DIR/export_logs.sh /usr/local/bin/piview-export-logs 2>/dev/null || true
+sudo chmod +x "$APP_DIR"/*.sh
 
-# Install screen keepalive as backup service
-echo "Installing screen keepalive backup service..."
-# Detect user for keepalive service too
-KEEPALIVE_USER="${ACTUAL_USER:-${USER:-pi}}"
-sudo tee /etc/systemd/system/piview-keepalive.service > /dev/null << EOF
+echo -e "${GREEN}✓ Helper scripts installed${NC}"
+
+# Systemd service
+echo ""
+echo "Installing systemd service..."
+
+sudo tee /etc/systemd/system/piview.service > /dev/null << EOF
 [Unit]
-Description=Piview Screen Keepalive Backup
-After=graphical.target
-Requires=graphical.target
+Description=Piview Factory Kiosk - Bulletproof Display
+After=network-online.target graphical.target
+Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-User=$KEEPALIVE_USER
-Group=$KEEPALIVE_USER
+User=$ACTUAL_USER
+Group=$ACTUAL_USER
+WorkingDirectory=$APP_DIR
+ExecStart=/usr/bin/python3 $APP_DIR/piview.py
 Environment=DISPLAY=:0
-Environment=XAUTHORITY=/home/$KEEPALIVE_USER/.Xauthority
-ExecStart=/opt/piview/screen_keepalive.sh
+Environment=XAUTHORITY=/home/$ACTUAL_USER/.Xauthority
+
+# Factory hardening
 Restart=always
 RestartSec=10
 
-[Install]
-WantedBy=graphical.target
-EOF
-sudo systemctl enable piview-keepalive.service 2>/dev/null || true
+# Resource limits
+MemoryMax=2G
+MemoryHigh=1.5G
+CPUQuota=200%
+TasksMax=100
 
-# Install systemd service with aggressive restart policy
-echo "Installing systemd service with bulletproof restart policy..."
-
-# Detect the actual user (fallback to 'pi' if not set)
-ACTUAL_USER="${USER:-pi}"
-if [ -z "$ACTUAL_USER" ] || [ "$ACTUAL_USER" = "root" ]; then
-    # Try to get the first non-root user
-    ACTUAL_USER=$(getent passwd | awk -F: '$3 >= 1000 && $1 != "nobody" {print $1; exit}' || echo "pi")
-fi
-
-echo "Using user: $ACTUAL_USER for systemd service" >&2
-
-if [ "$NEED_X_SERVER" = true ]; then
-    # Lite version - needs startx
-    sudo tee /etc/systemd/system/piview.service > /dev/null << EOF
-[Unit]
-Description=Piview Kiosk Mode - Factory Hardened
-After=network.target graphical.target
-Wants=graphical.target network-online.target
-Requires=network-online.target
-
-[Service]
-Type=simple
-User=$ACTUAL_USER
-Group=$ACTUAL_USER
-Environment=DISPLAY=:0
-Environment=XAUTHORITY=/home/$ACTUAL_USER/.Xauthority
-
-# Pre-start: Wait for network and prepare
-ExecStartPre=/bin/sleep 3
-
-# Main start - startx will handle X server startup
-ExecStart=/usr/bin/startx
-
-# Aggressive restart policy
-Restart=always
-RestartSec=5
-StartLimitInterval=0
-StartLimitBurst=0
-
-# Kill settings
-KillMode=mixed
-KillSignal=SIGTERM
-TimeoutStopSec=10
+# Watchdog
+WatchdogSec=180
 
 # Logging
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=piview
 
+# Security
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Never give up
+StartLimitBurst=999999
+
 [Install]
 WantedBy=graphical.target
 EOF
-else
-    # Desktop version - X server already running
-    sudo tee /etc/systemd/system/piview.service > /dev/null << EOF
+
+# Screen blanking prevention
+sudo tee /etc/systemd/system/disable-screen-blanking.service > /dev/null << 'EOF'
 [Unit]
-Description=Piview Kiosk Mode - Factory Hardened
-After=network.target graphical.target
-Wants=graphical.target network-online.target
-Requires=network-online.target
+Description=Disable Screen Blanking
+DefaultDependencies=no
+After=local-fs.target
 
 [Service]
-Type=simple
-User=$ACTUAL_USER
-Group=$ACTUAL_USER
-Environment=DISPLAY=:0
-Environment=XAUTHORITY=/home/$ACTUAL_USER/.Xauthority
-
-# Pre-start: Wait for X server and ensure screen blanking is disabled
-ExecStartPre=/bin/bash -c 'for i in {1..30}; do xset q >/dev/null 2>&1 && break || sleep 1; done'
-ExecStartPre=/bin/bash -c 'xset s off -dpms s noblank 2>/dev/null || true'
-ExecStartPre=/bin/bash -c 'setterm -blank 0 -powerdown 0 2>/dev/null || true'
-ExecStartPre=/bin/sleep 2
-
-# Main start - run directly (X server already running)
-ExecStart=/usr/bin/python3 /opt/piview/piview.py
-
-# Aggressive restart policy
-Restart=always
-RestartSec=5
-StartLimitInterval=0
-StartLimitBurst=0
-
-# Kill settings
-KillMode=mixed
-KillSignal=SIGTERM
-TimeoutStopSec=10
-
-# Logging
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=piview
+Type=oneshot
+ExecStart=/bin/sh -c 'echo 0 > /sys/module/kernel/parameters/consoleblank'
 
 [Install]
-WantedBy=graphical.target
+WantedBy=sysinit.target
 EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable disable-screen-blanking.service
+sudo systemctl enable piview.service
+
+echo -e "${GREEN}✓ Services configured${NC}"
+
+# Disable sleep/suspend (Pi only)
+if [ "$IS_PI" = true ]; then
+    echo ""
+    echo "Disabling sleep/suspend..."
+    sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target 2>/dev/null || true
 fi
 
-# Configure read-only mode script
-echo "Creating read-only mode toggle script..."
+# Kernel parameters (Pi only)
+if [ "$IS_PI" = true ] && [ -f /boot/cmdline.txt ]; then
+    echo "Configuring kernel parameters..."
+    if ! grep -q "consoleblank=0" /boot/cmdline.txt; then
+        sudo cp /boot/cmdline.txt /boot/cmdline.txt.backup
+        sudo sed -i 's/$/ consoleblank=0/' /boot/cmdline.txt
+    fi
+fi
+
+# Hardware watchdog (Pi only)
+if [ "$IS_PI" = true ]; then
+    echo ""
+    exec < /dev/tty
+    ask_tty_yn "Enable hardware watchdog?" WATCHDOG_REPLY "y"
+    if [[ $WATCHDOG_REPLY =~ ^[Yy]$ ]]; then
+        echo "Installing hardware watchdog..."
+        sudo apt-get install -y watchdog 2>/dev/null || true
+        
+        if [ -f /boot/config.txt ]; then
+            if ! grep -q "^dtparam=watchdog=on" /boot/config.txt; then
+                echo "dtparam=watchdog=on" | sudo tee -a /boot/config.txt > /dev/null
+            fi
+        fi
+        
+        if [ -f /etc/watchdog.conf ]; then
+            sudo sed -i 's/^#watchdog-device/watchdog-device/' /etc/watchdog.conf 2>/dev/null || true
+            if ! grep -q "^watchdog-device" /etc/watchdog.conf; then
+                echo "watchdog-device = /dev/watchdog" | sudo tee -a /etc/watchdog.conf > /dev/null
+            fi
+        fi
+        
+        sudo systemctl enable watchdog 2>/dev/null || true
+        echo -e "${GREEN}✓ Hardware watchdog enabled${NC}"
+    fi
+fi
+
+# Auto-login
+echo ""
+exec < /dev/tty
+ask_tty_yn "Enable auto-login?" AUTOLOGIN_REPLY "y"
+if [[ $AUTOLOGIN_REPLY =~ ^[Yy]$ ]]; then
+    sudo raspi-config nonint do_boot_behaviour B4 2>/dev/null || true
+    echo -e "${GREEN}✓ Auto-login enabled${NC}"
+fi
+
+# Firewall
+if command -v ufw &> /dev/null; then
+    echo ""
+    exec < /dev/tty
+    ask_tty_yn "Open firewall port $HEALTH_PORT for monitoring?" FIREWALL_REPLY "y"
+    if [[ $FIREWALL_REPLY =~ ^[Yy]$ ]]; then
+        sudo ufw allow $HEALTH_PORT/tcp comment "Piview health" 2>/dev/null || true
+        echo -e "${GREEN}✓ Firewall configured${NC}"
+    fi
+fi
+
+# Read-only filesystem toggle
+echo ""
+echo "Creating read-only toggle script..."
 sudo tee /usr/local/bin/overlayroot.sh > /dev/null << 'OVEREOF'
 #!/bin/bash
-# Toggle read-only mode for SD card
+# Toggle read-only filesystem
 
 if [ "$1" = "enable" ]; then
     echo "Enabling read-only mode..."
-    
-    # Make root filesystem read-only
     sudo mount -o remount,ro / 2>/dev/null || true
     sudo mount -o remount,ro /boot 2>/dev/null || true
     
-    # Update cmdline.txt for permanent read-only
     if [ -f /boot/cmdline.txt ]; then
         sudo cp /boot/cmdline.txt /boot/cmdline.txt.backup
         if ! grep -q "fastboot noswap" /boot/cmdline.txt; then
@@ -860,261 +437,89 @@ if [ "$1" = "enable" ]; then
         fi
     fi
     
-    # Update fstab
-    sudo cp /etc/fstab /etc/fstab.backup
+    sudo cp /etc/fstab /etc/fstab.backup 2>/dev/null || true
     sudo sed -i 's/vfat\s*defaults/vfat defaults,ro/' /etc/fstab 2>/dev/null || true
     sudo sed -i 's/ext4\s*defaults/ext4 defaults,ro/' /etc/fstab 2>/dev/null || true
     
-    echo "Read-only mode enabled. Reboot to apply fully."
-    echo "To make changes later, run: sudo overlayroot.sh disable"
+    echo "Read-only enabled. Reboot to apply."
     
 elif [ "$1" = "disable" ]; then
     echo "Disabling read-only mode..."
-    
-    # Make root filesystem read-write
     sudo mount -o remount,rw / 2>/dev/null || true
     sudo mount -o remount,rw /boot 2>/dev/null || true
     
-    # Restore cmdline.txt
     if [ -f /boot/cmdline.txt.backup ]; then
         sudo cp /boot/cmdline.txt.backup /boot/cmdline.txt
-    else
-        sudo sed -i 's/ fastboot noswap//' /boot/cmdline.txt 2>/dev/null || true
     fi
-    
-    # Restore fstab
     if [ -f /etc/fstab.backup ]; then
         sudo cp /etc/fstab.backup /etc/fstab
-    else
-        sudo sed -i 's/vfat defaults,ro/vfat defaults/' /etc/fstab 2>/dev/null || true
-        sudo sed -i 's/ext4 defaults,ro/ext4 defaults/' /etc/fstab 2>/dev/null || true
     fi
     
-    echo "Read-only mode disabled. Filesystem is now writable."
+    echo "Read-only disabled. Filesystem writable."
     
 elif [ "$1" = "status" ]; then
-    ROOT=$(findmnt -n -o OPTIONS / 2>/dev/null | grep -o ro || echo "")
-    BOOT=$(findmnt -n -o OPTIONS /boot 2>/dev/null | grep -o ro || echo "")
-    if [ -n "$ROOT" ] || [ -n "$BOOT" ]; then
-        echo "Read-only mode: ENABLED"
-    else
-        echo "Read-only mode: DISABLED"
-    fi
+    ROOT=$(findmnt -n -o OPTIONS / | grep -o ro || echo "")
+    [ -n "$ROOT" ] && echo "Read-only: ENABLED" || echo "Read-only: DISABLED"
 else
     echo "Usage: overlayroot.sh {enable|disable|status}"
-    echo ""
-    echo "  enable  - Enable read-only mode (protects SD card)"
-    echo "  disable - Disable read-only mode (allows writes)"
-    echo "  status  - Check current read-only status"
 fi
 OVEREOF
 sudo chmod +x /usr/local/bin/overlayroot.sh
 
-# Install additional tools for screen management
-echo "Installing additional screen management tools..."
-# Note: tvservice is deprecated on newer firmware but kept for compatibility
-sudo apt-get install -y \
-    unclutter \
-    xdotool || true
-# tvservice may not be available on newer Pi OS - install if available
-sudo apt-get install -y tvservice 2>/dev/null || echo "Note: tvservice not available (deprecated on newer firmware)" || true
-
-# Configure .xinitrc with screen blanking prevention (simplified - Python handles keepalive)
-if [ "$NEED_X_SERVER" = true ]; then
-    echo "Configuring X server with screen blanking prevention..."
-    cat > ~/.xinitrc << 'XINITEOF'
-#!/bin/sh
-# Start Piview - Factory Hardened
-# Screen blanking is handled by: kernel (consoleblank=0) + Python keepalive thread
-
-# Disable screen blanking via X server
-xset s off -dpms s noblank 2>/dev/null || true
-
-# Hide cursor
-unclutter -idle 1 -root &
-
-# Keep X server alive - restart Piview if it exits
-# This ensures X server doesn't close when browser closes
-while true; do
-    # Start Piview (Python handles keepalive and browser restart)
-    /usr/bin/python3 /opt/piview/piview.py
-    
-    # If Piview exits (shouldn't happen), wait a moment and restart
-    # This keeps X server alive even if browser closes
-    sleep 2
-done
-XINITEOF
-    chmod +x ~/.xinitrc
-else
-    echo "Desktop environment detected - X server already running"
-    echo "Creating autostart entry instead..."
-    mkdir -p ~/.config/autostart
-    cat > ~/.config/autostart/piview.desktop << 'DESKTOPEOF'
-[Desktop Entry]
-Type=Application
-Name=Piview
-Exec=/usr/bin/python3 /opt/piview/piview.py
-Hidden=false
-NoDisplay=false
-X-GNOME-Autostart-enabled=true
-DESKTOPEOF
-fi
-
-# Disable screen blanking at system level (kernel layer)
-# Note: Python keepalive thread handles user-space layer
-echo "Disabling screen blanking at system level (kernel)..."
-sudo tee /etc/systemd/system/disable-screen-blanking.service > /dev/null << 'BLANKEOF'
-[Unit]
-Description=Disable Screen Blanking (Kernel Layer)
-After=multi-user.target
-
-[Service]
-Type=oneshot
-ExecStart=/bin/bash -c 'echo 0 > /sys/module/kernel/parameters/consoleblank || true'
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-BLANKEOF
-
-sudo systemctl enable disable-screen-blanking.service
-
-# Disable sleep/suspend/hibernate (skip on VirtualBox)
-if [ "$IS_VIRTUALBOX" != true ]; then
-    echo "Disabling system sleep/suspend..."
-    sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target 2>/dev/null || true
-else
-    echo "Skipping sleep/suspend disable (VirtualBox handles this)"
-fi
-
-# Configure kernel parameters to prevent blanking (skip on VirtualBox)
-if [ "$IS_VIRTUALBOX" != true ] && [ -f /boot/cmdline.txt ]; then
-    echo "Configuring kernel parameters..."
-    if ! grep -q "consoleblank=0" /boot/cmdline.txt 2>/dev/null; then
-        sudo sed -i 's/$/ consoleblank=0/' /boot/cmdline.txt
-    fi
-else
-    echo "Skipping kernel parameter configuration (VirtualBox or no /boot/cmdline.txt)"
-fi
-
-# Create log directory
-echo "Creating log directory..."
+# Create logs
 sudo mkdir -p /var/log
 sudo touch /var/log/piview.log
-sudo chmod 666 /var/log/piview.log 2>/dev/null || true
+sudo chmod 666 /var/log/piview.log
 
-# Configure hardware watchdog (The "Nuke" Option - for kernel freezes)
-echo "" >&2
-ask_tty_yn "Enable hardware watchdog? (reboots Pi if kernel freezes - recommended for factory)" WATCHDOG_REPLY "y"
-if [[ $WATCHDOG_REPLY =~ ^[Yy]$ ]] || [ -z "$WATCHDOG_REPLY" ]; then
-    echo "Configuring hardware watchdog..."
-    
-    # Install watchdog package
-    sudo apt-get install -y watchdog || true
-    
-    # Enable watchdog in boot config (Raspberry Pi only)
-    if [ "$IS_RASPBERRY_PI" = true ] && [ -f /boot/config.txt ]; then
-        if ! grep -q "^dtparam=watchdog=on" /boot/config.txt 2>/dev/null; then
-            echo "Enabling watchdog in /boot/config.txt..."
-            echo "dtparam=watchdog=on" | sudo tee -a /boot/config.txt > /dev/null
-        else
-            echo "Watchdog already enabled in /boot/config.txt"
-        fi
-    fi
-    
-    # Configure watchdog service
-    if [ -f /etc/watchdog.conf ]; then
-        # Uncomment watchdog-device line
-        sudo sed -i 's/^#watchdog-device/watchdog-device/' /etc/watchdog.conf 2>/dev/null || true
-        sudo sed -i 's/^#.*watchdog-device.*=.*\/dev\/watchdog/watchdog-device = \/dev\/watchdog/' /etc/watchdog.conf 2>/dev/null || true
-        
-        # Ensure the line exists
-        if ! grep -q "^watchdog-device" /etc/watchdog.conf 2>/dev/null; then
-            echo "watchdog-device = /dev/watchdog" | sudo tee -a /etc/watchdog.conf > /dev/null
-        fi
-    fi
-    
-    # Enable and start watchdog service
-    sudo systemctl enable watchdog 2>/dev/null || true
-    sudo systemctl start watchdog 2>/dev/null || true
-    
-    echo "✓ Hardware watchdog configured (Pi will auto-reboot on kernel freeze)"
-    echo "  Note: Reboot required for /boot/config.txt changes to take effect"
-else
-    echo "Hardware watchdog skipped"
-fi
-
-# Reload systemd
-sudo systemctl daemon-reload
-sudo systemctl start disable-screen-blanking.service 2>/dev/null || true
-
+# Summary
 echo ""
-echo "=========================================="
-echo "Setup Complete!"
-echo "=========================================="
+echo "=========================================================="
+echo -e "${GREEN}Setup Complete!${NC}"
+echo "=========================================================="
 echo ""
 echo "Configuration: $CONFIG_DIR/config.json"
 echo "URL: $USER_URL"
-echo "Refresh interval: $REFRESH_INTERVAL seconds"
+echo "Health: http://$(hostname -I | awk '{print $1}'):$HEALTH_PORT/health"
 echo ""
-echo "To edit URL, edit the config file:"
-echo "  sudo nano $CONFIG_DIR/config.json"
+echo "Commands:"
+echo "  sudo systemctl start piview   - Start now"
+echo "  sudo /opt/piview/restart.sh   - Restart"
+echo "  sudo /opt/piview/status.sh    - Check status"
+echo "  sudo /opt/piview/logs.sh      - View live logs"
 echo ""
-echo "To start Piview manually:"
-echo "  startx"
-echo ""
-echo "To enable auto-start on boot:"
-echo "  sudo systemctl enable piview.service"
-echo ""
-echo "To start the service now:"
-echo "  sudo systemctl start piview.service"
-echo ""
-echo "To close browser: Press Alt+F4 or use /opt/piview/close_browser.sh"
-echo "To stop Piview: Press Ctrl+C or stop service"
+echo "Factory Features:"
+echo "  ✓ Watchdog (${WATCHDOG_THRESHOLD}s freeze threshold)"
+echo "  ✓ Auto-reboot (after $AUTO_REBOOT_FAILURES failures)"
+echo "  ✓ Memory monitoring (${MEMORY_LIMIT}MB limit)"
+echo "  ✓ Health endpoint (port $HEALTH_PORT)"
+echo "  ✓ Infinite restarts"
 echo ""
 
-if [ -f /usr/local/bin/overlayroot.sh ]; then
-    echo "Read-only mode commands:"
-    echo "  sudo overlayroot.sh enable   - Enable read-only"
-    echo "  sudo overlayroot.sh disable  - Disable read-only"
-    echo "  sudo overlayroot.sh status   - Check status"
+# Offer to start
+exec < /dev/tty
+ask_tty_yn "Start Piview now?" START_REPLY "y"
+if [[ $START_REPLY =~ ^[Yy]$ ]]; then
+    sudo systemctl start piview
+    sleep 3
+    sudo systemctl status piview --no-pager || true
     echo ""
-fi
-
-# Always enable and start by default (bulletproof)
-echo "Enabling and starting Piview service..."
-sudo systemctl enable piview.service
-sudo systemctl start piview.service
-
-# Verify it started
-sleep 2
-if sudo systemctl is-active --quiet piview.service; then
-    echo "✓ Piview service is running"
+    echo -e "${GREEN}Piview is running!${NC}"
 else
-    echo "⚠ Service may need a moment to start. Check with: sudo systemctl status piview.service"
+    echo "Start later: sudo systemctl start piview"
 fi
 
+# Read-only option
 echo ""
-echo "=========================================="
-echo "Final Step: Read-Only Filesystem (Optional)"
-echo "=========================================="
-echo ""
-echo "Read-only mode protects your SD card from wear, but must be enabled LAST"
-echo "after all installation steps are complete."
-echo "" >&2
-ask_tty_yn "Enable read-only mode for SD card now? (recommended for factory use, but enable only after install completes)" READONLY_REPLY "n"
+exec < /dev/tty
+ask_tty_yn "Enable read-only filesystem now?" READONLY_REPLY "n"
 if [[ $READONLY_REPLY =~ ^[Yy]$ ]]; then
-    echo "Enabling read-only mode..."
     sudo /usr/local/bin/overlayroot.sh enable
-    echo "Read-only mode enabled. Reboot to apply fully."
+    echo "Reboot to apply: sudo reboot"
 else
-    echo "Read-only mode skipped. You can enable it later with: sudo overlayroot.sh enable"
+    echo "Enable later: sudo overlayroot.sh enable"
 fi
 
 echo ""
-echo "=========================================="
-echo "Setup Complete!"
-echo "=========================================="
-echo ""
-echo "Setup complete! Reboot to start in kiosk mode."
-echo ""
+echo "=========================================================="
+echo "Installation complete!"
+echo "=========================================================="
