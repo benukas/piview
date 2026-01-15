@@ -45,6 +45,60 @@ echo "Piview - Pi OS Lite Setup"
 echo "=========================================="
 echo ""
 
+# Check if read-only mode is enabled - must be disabled for installation
+echo "Checking filesystem write protection..."
+ROOT=$(findmnt -n -o OPTIONS / 2>/dev/null | grep -o ro || echo "")
+BOOT=$(findmnt -n -o OPTIONS /boot 2>/dev/null | grep -o ro || echo "")
+
+if [ -n "$ROOT" ] || [ -n "$BOOT" ]; then
+    echo ""
+    echo "⚠️  ERROR: Read-only filesystem is ENABLED"
+    echo ""
+    echo "Installation cannot proceed with read-only mode enabled."
+    echo "Please disable it first:"
+    echo ""
+    echo "  1. Run: sudo overlayroot.sh disable"
+    echo "  2. Reboot: sudo reboot"
+    echo "  3. Run this installer again after reboot"
+    echo ""
+    echo "Or if you're uninstalling/reinstalling:"
+    echo "  1. Run: ./uninstall.sh"
+    echo "  2. It will disable read-only and ask you to reboot"
+    echo "  3. After reboot, run this installer again"
+    echo ""
+    exit 1
+fi
+
+# Also check cmdline.txt and fstab for read-only flags
+if [ -f /boot/cmdline.txt ] && grep -q "fastboot noswap" /boot/cmdline.txt 2>/dev/null; then
+    echo ""
+    echo "⚠️  WARNING: Read-only flags found in /boot/cmdline.txt"
+    echo "   These will be applied on next reboot."
+    echo "   Please disable read-only mode first: sudo overlayroot.sh disable"
+    echo ""
+    read -p "Continue anyway? (y/n) " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        exit 1
+    fi
+fi
+
+if [ -f /etc/fstab ] && grep -q "defaults,ro" /etc/fstab 2>/dev/null; then
+    echo ""
+    echo "⚠️  WARNING: Read-only flags found in /etc/fstab"
+    echo "   These will be applied on next reboot."
+    echo "   Please disable read-only mode first: sudo overlayroot.sh disable"
+    echo ""
+    read -p "Continue anyway? (y/n) " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        exit 1
+    fi
+fi
+
+echo "✓ Filesystem is writable - installation can proceed"
+echo ""
+
 # Check if running on Raspberry Pi or VirtualBox
 IS_RASPBERRY_PI=false
 IS_VIRTUALBOX=false

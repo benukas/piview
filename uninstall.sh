@@ -1,8 +1,26 @@
 #!/bin/bash
 # Piview Uninstall Script
 # Aggressively stops ALL services, processes, and autostarts, then removes everything
+# Two-phase: Disables read-only mode and asks for reboot
 
 set -e
+
+# Helper function for pipe-safe prompts
+ask_tty_yn() {
+    local prompt_text=$1
+    local var_name=$2
+    local default_val=$3
+    
+    echo -n "$prompt_text [$default_val]: " >&2
+    read -n 1 response </dev/tty 2>/dev/null || response="$default_val"
+    echo "" >&2
+    
+    if [ -z "$response" ]; then
+        response="$default_val"
+    fi
+    
+    eval "$var_name=\"$response\""
+}
 
 echo "=========================================="
 echo "Piview Complete Uninstall"
@@ -117,6 +135,67 @@ sudo pkill -9 chromium 2>/dev/null || true
 sudo pkill -9 chromium-browser 2>/dev/null || true
 sudo pkill -9 -f piview.py 2>/dev/null || true
 
+# Disable read-only mode (overlay filesystem) if enabled
+echo ""
+echo "=========================================="
+echo "Disabling Read-Only Filesystem"
+echo "=========================================="
+echo ""
+
+if [ -f /usr/local/bin/overlayroot.sh ]; then
+    # Check current status
+    ROOT=$(findmnt -n -o OPTIONS / 2>/dev/null | grep -o ro || echo "")
+    BOOT=$(findmnt -n -o OPTIONS /boot 2>/dev/null | grep -o ro || echo "")
+    
+    if [ -n "$ROOT" ] || [ -n "$BOOT" ]; then
+        echo "Read-only mode is currently ENABLED"
+        echo "Disabling read-only mode..."
+        sudo /usr/local/bin/overlayroot.sh disable
+        
+        # Also check cmdline.txt and fstab
+        if [ -f /boot/cmdline.txt ] && grep -q "fastboot noswap" /boot/cmdline.txt 2>/dev/null; then
+            echo "Removing read-only flags from /boot/cmdline.txt..."
+            if [ -f /boot/cmdline.txt.backup ]; then
+                sudo cp /boot/cmdline.txt.backup /boot/cmdline.txt
+            else
+                sudo sed -i 's/ fastboot noswap//' /boot/cmdline.txt 2>/dev/null || true
+            fi
+        fi
+        
+        if [ -f /etc/fstab ]; then
+            if grep -q "defaults,ro" /etc/fstab 2>/dev/null; then
+                echo "Removing read-only flags from /etc/fstab..."
+                if [ -f /etc/fstab.backup ]; then
+                    sudo cp /etc/fstab.backup /etc/fstab
+                else
+                    sudo sed -i 's/vfat defaults,ro/vfat defaults/' /etc/fstab 2>/dev/null || true
+                    sudo sed -i 's/ext4 defaults,ro/ext4 defaults/' /etc/fstab 2>/dev/null || true
+                fi
+            fi
+        fi
+        
+        echo "✓ Read-only mode disabled"
+        echo ""
+        echo "⚠️  IMPORTANT: A reboot is REQUIRED for changes to take full effect."
+        echo ""
+        ask_tty_yn "Reboot now?" REBOOT_REPLY "y"
+        if [[ $REBOOT_REPLY =~ ^[Yy]$ ]]; then
+            echo "Rebooting in 5 seconds... (Press Ctrl+C to cancel)"
+            sleep 5
+            sudo reboot
+        else
+            echo ""
+            echo "⚠️  You MUST reboot before running setup.sh again!"
+            echo "   After reboot, run: curl -sSL https://raw.githubusercontent.com/benukas/piview/main/install.sh | bash"
+            echo ""
+        fi
+    else
+        echo "Read-only mode is already DISABLED"
+    fi
+else
+    echo "Read-only mode script not found (may not have been enabled)"
+fi
+
 echo ""
 echo "=========================================="
 echo "Piview Completely Uninstalled"
@@ -129,12 +208,10 @@ echo "  ✓ All systemd services"
 echo "  ✓ Autostart entries"
 echo "  ✓ .xinitrc configuration"
 echo "  ✓ Application files"
+echo "  ✓ Read-only filesystem protection (reboot required)"
 echo ""
-echo "To verify everything is removed, run:"
-echo "  ps aux | grep -i piview"
-echo "  ps aux | grep -i chromium"
-echo "  sudo systemctl status piview.service"
-echo ""
-echo "To reinstall, run:"
-echo "  curl -sSL https://raw.githubusercontent.com/benukas/piview/main/install.sh | bash"
+echo "⚠️  NEXT STEPS:"
+echo "  1. If read-only was disabled, REBOOT NOW"
+echo "  2. After reboot, run the installer again:"
+echo "     curl -sSL https://raw.githubusercontent.com/benukas/piview/main/install.sh | bash"
 echo ""
