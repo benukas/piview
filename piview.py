@@ -23,7 +23,7 @@ USER_CONFIG_FILE = Path.home() / ".piview" / "config.json"
 LOG_FILE = Path("/var/log/piview.log")
 
 DEFAULT_CONFIG = {
-    "url": "https://example.com",
+    "url": "http://example.com",
     "refresh_interval": 60,  # seconds
     "browser": "chromium-browser",
     "health_check_interval": 10,  # seconds between health checks
@@ -37,25 +37,10 @@ DEFAULT_CONFIG = {
         "--disable-infobars",
         "--disable-session-crashed-bubble",
         "--disable-restore-session-state",
-        "--autoplay-policy=no-user-gesture-required",
-        "--disable-features=TranslateUI",
-        "--disable-ipc-flooding-protection",
-        # "--disable-background-networking",  # Removed: can cause immediate exit on Pi OS Lite
-        "--disable-default-apps",
         "--disable-sync",
         "--disable-dev-shm-usage",
         "--no-sandbox",
         "--disable-gpu",
-        "--disable-software-rasterizer",
-        "--ignore-certificate-errors",
-        "--ignore-ssl-errors",
-        "--ignore-certificate-errors-spki-list",
-        "--allow-running-insecure-content",
-        "--disable-web-security",
-        "--test-type",
-        "--unsafely-treat-insecure-origin-as-secure",
-        "--allow-insecure-localhost",
-        "--ignore-certificate-errors-spki-list",
         "--user-data-dir=/tmp/chromium-ssl-bypass"
     ]
 }
@@ -77,6 +62,9 @@ class Piview:
         self.consecutive_network_failures = 0
         self.network_failover_triggered = False
         
+        # Setup X server environment EARLY (before logging, so it's available)
+        self.setup_x_environment()
+        
         # Setup logging (must be early)
         self.setup_logging()
         
@@ -93,6 +81,49 @@ class Piview:
         
         # Start background threads
         self.start_background_threads()
+    
+    def setup_x_environment(self):
+        """Setup X server environment variables early"""
+        # Set DISPLAY
+        display = os.environ.get('DISPLAY', ':0')
+        os.environ['DISPLAY'] = display
+        
+        # Set XAUTHORITY if not already set
+        if 'XAUTHORITY' not in os.environ:
+            # Try to get actual user (not just from env)
+            try:
+                import pwd
+                username = pwd.getpwuid(os.getuid()).pw_name
+            except Exception:
+                username = os.environ.get('USER', os.environ.get('USERNAME', 'pi'))
+            
+            xauth_paths = [
+                f"/home/{username}/.Xauthority",
+                os.path.expanduser("~/.Xauthority"),
+                f"/root/.Xauthority"
+            ]
+            
+            for xauth_path in xauth_paths:
+                if os.path.exists(xauth_path):
+                    os.environ['XAUTHORITY'] = xauth_path
+                    break
+            else:
+                # If not found, try to create it or use xauth to generate
+                try:
+                    # Try to get XAUTHORITY from xauth
+                    result = subprocess.run(
+                        ["xauth", "list"],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL,
+                        timeout=2,
+                        env=dict(os.environ, DISPLAY=display)
+                    )
+                    if result.returncode == 0:
+                        # Xauth works, use default location
+                        default_xauth = os.path.expanduser("~/.Xauthority")
+                        os.environ['XAUTHORITY'] = default_xauth
+                except Exception:
+                    pass
     
     def setup_logging(self):
         """Setup logging to file and console"""
@@ -502,8 +533,30 @@ class Piview:
             pass
     
     def check_url_connectivity(self, url):
-        """Check if URL is reachable before opening browser"""
+        """Check if URL is reachable before opening browser - includes DNS check"""
         try:
+            from urllib.parse import urlparse
+            
+            # Parse URL to get hostname
+            parsed = urlparse(url)
+            hostname = parsed.hostname
+            
+            if not hostname:
+                self.log(f"Invalid URL (no hostname): {url}", 'error')
+                return False
+            
+            # First check DNS resolution
+            try:
+                import socket
+                socket.gethostbyname(hostname)
+                self.log(f"DNS resolution successful for {hostname}")
+            except socket.gaierror as e:
+                self.log(f"DNS resolution failed for {hostname}: {e}", 'error')
+                self.log("This will cause 'DNS probe finished nxdomain' error in browser", 'error')
+                return False
+            except Exception as e:
+                self.log(f"DNS check error: {e}", 'warning')
+            
             # Create SSL context that ignores certificate errors if configured
             if self.config.get("ignore_ssl_errors", True):
                 ssl_context = ssl.create_default_context()
@@ -714,22 +767,43 @@ class Piview:
         if browser_cmd != self.config.get("browser"):
             self.log(f"Using browser: {browser_cmd} (instead of {self.config.get('browser')})", 'warning')
         
-        # Check URL connectivity before opening browser
+        # Check URL connectivity before opening browser (includes DNS check)
         max_retries = self.config.get("max_connection_retries", 3)
         retry_delay = self.config.get("connection_retry_delay", 5)
         
         url_reachable = False
+        dns_failed = False
+        
         for attempt in range(max_retries):
             if self.check_url_connectivity(url):
                 url_reachable = True
                 self.connection_failures = 0
                 break
             else:
+                # Check if it's a DNS failure specifically
+                try:
+                    from urllib.parse import urlparse
+                    import socket
+                    parsed = urlparse(url)
+                    hostname = parsed.hostname
+                    socket.gethostbyname(hostname)
+                except socket.gaierror:
+                    dns_failed = True
+                    self.log(f"DNS resolution failed for {hostname} - will show DNS error page", 'error')
+                    break  # Don't retry if DNS fails
+                except Exception:
+                    pass
+                
                 self.log(f"URL not reachable, retrying ({attempt + 1}/{max_retries})...", 'warning')
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay)
         
-        if not url_reachable:
+        if dns_failed:
+            self.connection_failures += 1
+            self.log(f"DNS resolution failed - browser will show 'DNS probe finished nxdomain' error", 'error')
+            self.log("Check your network connection and URL configuration", 'error')
+            # Still open browser so user can see the error
+        elif not url_reachable:
             self.connection_failures += 1
             self.log(f"URL not reachable after {max_retries} attempts, opening browser anyway (may show error)", 'warning')
         else:
@@ -778,14 +852,36 @@ class Piview:
         
         cmd = [browser_cmd] + kiosk_flags + [url]
         
+        # Create environment with X server vars explicitly
+        env = os.environ.copy()
+        env['DISPLAY'] = os.environ.get('DISPLAY', ':0')
+        if 'XAUTHORITY' in os.environ:
+            env['XAUTHORITY'] = os.environ['XAUTHORITY']
+        
         try:
             self.log(f"Launching browser: {' '.join(cmd)}")
+            self.log(f"Environment: DISPLAY={env.get('DISPLAY')}, XAUTHORITY={env.get('XAUTHORITY', 'NOT SET')}")
+            self.log(f"URL: {url}")
+            
+            # Launch with explicit environment and capture stderr for debugging
             self.browser_process = subprocess.Popen(
                 cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                env=os.environ.copy()
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env
             )
+            
+            # Log any immediate errors
+            time.sleep(1)  # Give it a moment to start
+            if self.browser_process.poll() is not None:
+                # Browser exited immediately - get error
+                stdout, stderr = self.browser_process.communicate(timeout=1)
+                if stderr:
+                    self.log(f"Browser error output: {stderr.decode('utf-8', errors='ignore')}", 'error')
+                if stdout:
+                    self.log(f"Browser stdout: {stdout.decode('utf-8', errors='ignore')}", 'error')
+                self.log(f"Browser exited immediately with code: {self.browser_process.returncode}", 'error')
+                return False
             
             # Record launch time (for ignoring early exits)
             self.browser_launch_time = time.time()

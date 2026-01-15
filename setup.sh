@@ -571,7 +571,7 @@ echo "==========================================" >&2
 echo "" >&2
 
 # Get URL from user or use default
-ask_tty "Enter the URL to display" USER_URL "https://example.com"
+ask_tty "Enter the URL to display" USER_URL "http://example.com"
 
 # Get refresh interval
 ask_tty "Enter refresh interval (seconds)" REFRESH_INTERVAL "60"
