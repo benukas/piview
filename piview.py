@@ -309,6 +309,100 @@ class Piview:
                 self.log(f"Health check error: {e}", 'warning')
                 time.sleep(30)
     
+    def watchdog_thread(self):
+        """Kill frozen browser if it stops responding"""
+        last_activity = time.time()
+        frozen_threshold = 120  # 2 minutes without response = frozen
+        
+        while self.running:
+            time.sleep(15)  # Check every 15 seconds
+            
+            if not self.browser_process or self.browser_process.poll() is not None:
+                last_activity = time.time()
+                continue
+            
+            # Test if browser responds to X commands
+            try:
+                result = subprocess.run(
+                    ["xdotool", "search", "--class", "chromium"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5
+                )
+                
+                if result.returncode == 0 and result.stdout:
+                    # Browser window exists and responds
+                    last_activity = time.time()
+                else:
+                    # No window found - might be frozen
+                    elapsed = time.time() - last_activity
+                    if elapsed > frozen_threshold:
+                        self.log(f"Browser frozen for {elapsed:.0f}s - KILLING", 'error')
+                        try:
+                            self.browser_process.kill()
+                            subprocess.run(["pkill", "-9", "-f", "chromium"], 
+                                         timeout=2, check=False,
+                                         stdout=subprocess.DEVNULL,
+                                         stderr=subprocess.DEVNULL)
+                        except Exception:
+                            pass
+                        last_activity = time.time()
+                        
+            except subprocess.TimeoutExpired:
+                # xdotool itself timed out - system is struggling
+                elapsed = time.time() - last_activity
+                if elapsed > frozen_threshold:
+                    self.log("System unresponsive - force killing browser", 'error')
+                    subprocess.run(["pkill", "-9", "-f", "chromium"], 
+                                 timeout=2, check=False,
+                                 stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+                    last_activity = time.time()
+            except Exception as e:
+                self.log(f"Watchdog check failed: {e}", 'warning')
+    
+    def create_error_page(self, error_type, url, details=""):
+        """Create a local HTML error page"""
+        error_html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>Connection Error</title>
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background: #1a1a1a;
+            color: #fff;
+        }}
+        .error-box {{
+            text-align: center;
+            padding: 40px;
+            background: #2d2d2d;
+            border-radius: 10px;
+            max-width: 600px;
+        }}
+        h1 {{ color: #ff6b6b; }}
+        .retry {{ margin-top: 20px; color: #888; }}
+    </style>
+</head>
+<body>
+    <div class="error-box">
+        <h1>⚠️ {error_type}</h1>
+        <p><strong>URL:</strong> {url}</p>
+        <p>{details}</p>
+        <p class="retry">Piview will retry automatically...</p>
+    </div>
+</body>
+</html>"""
+        
+        error_file = Path("/tmp/piview_error.html")
+        error_file.write_text(error_html)
+        return f"file://{error_file}"
+    
     def start_background_threads(self):
         """Start background monitoring threads"""
         try:
@@ -317,6 +411,12 @@ class Piview:
             
             health_thread = threading.Thread(target=self.health_check_thread, daemon=True)
             health_thread.start()
+            
+            # WATCHDOG - kills frozen browser
+            watchdog = threading.Thread(target=self.watchdog_thread, daemon=True)
+            watchdog.start()
+            self.log("Watchdog enabled (120s freeze threshold)")
+            
         except Exception as e:
             self.log(f"Could not start background threads: {e}", 'warning')
     
@@ -533,11 +633,11 @@ class Piview:
             pass
     
     def check_url_connectivity(self, url):
-        """Check if URL is reachable before opening browser - includes DNS check"""
+        """Check if URL is reachable with detailed error reporting"""
         try:
             from urllib.parse import urlparse
+            import socket
             
-            # Parse URL to get hostname
             parsed = urlparse(url)
             hostname = parsed.hostname
             
@@ -545,19 +645,15 @@ class Piview:
                 self.log(f"Invalid URL (no hostname): {url}", 'error')
                 return False
             
-            # First check DNS resolution
+            # DNS resolution check
             try:
-                import socket
-                socket.gethostbyname(hostname)
-                self.log(f"DNS resolution successful for {hostname}")
+                ip = socket.gethostbyname(hostname)
+                self.log(f"DNS OK: {hostname} -> {ip}")
             except socket.gaierror as e:
-                self.log(f"DNS resolution failed for {hostname}: {e}", 'error')
-                self.log("This will cause 'DNS probe finished nxdomain' error in browser", 'error')
+                self.log(f"DNS FAILED for {hostname}: {e}", 'error')
                 return False
-            except Exception as e:
-                self.log(f"DNS check error: {e}", 'warning')
             
-            # Create SSL context that ignores certificate errors if configured
+            # Create SSL context
             if self.config.get("ignore_ssl_errors", True):
                 ssl_context = ssl.create_default_context()
                 ssl_context.check_hostname = False
@@ -565,18 +661,22 @@ class Piview:
             else:
                 ssl_context = None
             
-            # Try to connect
+            # HTTP connectivity check
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
             try:
                 with urllib.request.urlopen(req, timeout=10, context=ssl_context) as response:
-                    return response.status in [200, 301, 302, 303, 307, 308]
+                    status = response.status
+                    self.log(f"HTTP OK: Status {status}")
+                    return status in [200, 301, 302, 303, 307, 308]
             except urllib.error.HTTPError as e:
-                # HTTP error but connection works
-                return e.code < 500
-            except (urllib.error.URLError, Exception) as e:
-                # Don't log every failure - only log if it's a persistent issue
+                self.log(f"HTTP Error {e.code}", 'warning')
+                return e.code < 500  # 4xx is reachable but error, 5xx is not
+            except Exception as e:
+                self.log(f"Connection failed: {e}", 'error')
                 return False
+                
         except Exception as e:
+            self.log(f"Connectivity check error: {e}", 'error')
             return False
     
     def find_ethernet_interface(self):
@@ -694,176 +794,76 @@ class Piview:
             self.log(f"Error during network failover: {e}", 'error')
     
     def open_url(self, url):
-        """Open a URL in kiosk mode with error handling and connection verification"""
+        """Open a URL in kiosk mode with proper error handling"""
         self.close_browser()
         
-        # Wait for X server to be ready
         if not self.wait_for_x_server():
-            self.log("X server not available, cannot open browser", 'error')
             return False
         
-        # Set display and XAUTHORITY (critical for X server authentication)
-        display = os.environ.get('DISPLAY', ':0')
-        os.environ['DISPLAY'] = display
-        
-        # Set XAUTHORITY if not already set - required for Chromium to authenticate with X server
-        if 'XAUTHORITY' not in os.environ:
-            # Try common locations
-            username = os.environ.get('USER', os.environ.get('USERNAME', 'pi'))
-            xauth_paths = [
-                f"/home/{username}/.Xauthority",
-                os.path.expanduser("~/.Xauthority"),
-                "/root/.Xauthority"
-            ]
-            for xauth_path in xauth_paths:
-                if os.path.exists(xauth_path):
-                    os.environ['XAUTHORITY'] = xauth_path
-                    self.log(f"Set XAUTHORITY={xauth_path}")
-                    break
-            else:
-                # If not found, try to detect from X server
-                try:
-                    result = subprocess.run(
-                        ["xauth", "list"],
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.DEVNULL,
-                        timeout=2
-                    )
-                    if result.returncode == 0:
-                        # Xauth works, try to find the file
-                        xauth_file = os.path.expanduser("~/.Xauthority")
-                        if os.path.exists(xauth_file):
-                            os.environ['XAUTHORITY'] = xauth_file
-                            self.log(f"Set XAUTHORITY={xauth_file} (detected)")
-                except Exception:
-                    pass
-        
-        # Log X server environment for debugging
-        self.log(f"X Server Environment: DISPLAY={os.environ.get('DISPLAY')}, XAUTHORITY={os.environ.get('XAUTHORITY', 'NOT SET')}")
-        
-        # Verify X server is actually working
+        # Verify X server works
         try:
-            subprocess.run(
-                ["xset", "q"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=2,
-                check=True
-            )
+            subprocess.run(["xset", "q"], check=True, timeout=2,
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception as e:
-            self.log(f"X server verification failed: {e}", 'error')
+            self.log(f"X server not working: {e}", 'error')
             return False
         
-        # Ensure screen blanking is disabled before opening
-        self.prevent_screen_blanking()
-        
-        # Find browser executable
+        # Find browser
         browser_cmd = self.find_browser()
         if not browser_cmd:
-            self.log("No browser found. Please install chromium-browser or chromium", 'error')
+            self.log("No browser found", 'error')
             return False
         
-        # Update config with found browser
-        if browser_cmd != self.config.get("browser"):
-            self.log(f"Using browser: {browser_cmd} (instead of {self.config.get('browser')})", 'warning')
+        # CHECK URL CONNECTIVITY - DON'T PROCEED IF DNS FAILS
+        self.log(f"Checking connectivity to {url}...")
+        url_ok = self.check_url_connectivity(url)
         
-        # Check URL connectivity before opening browser (includes DNS check)
-        max_retries = self.config.get("max_connection_retries", 3)
-        retry_delay = self.config.get("connection_retry_delay", 5)
+        if not url_ok:
+            self.log("URL not reachable - showing error page instead", 'error')
+            # Show error page instead of broken URL
+            error_url = self.create_error_page(
+                "DNS Resolution Failed",
+                url,
+                "Cannot resolve hostname. Check network connection."
+            )
+            url = error_url  # Use error page instead
         
-        url_reachable = False
-        dns_failed = False
+        self.prevent_screen_blanking()
         
-        for attempt in range(max_retries):
-            if self.check_url_connectivity(url):
-                url_reachable = True
-                self.connection_failures = 0
-                break
-            else:
-                # Check if it's a DNS failure specifically
-                try:
-                    from urllib.parse import urlparse
-                    import socket
-                    parsed = urlparse(url)
-                    hostname = parsed.hostname
-                    socket.gethostbyname(hostname)
-                except socket.gaierror:
-                    dns_failed = True
-                    self.log(f"DNS resolution failed for {hostname} - will show DNS error page", 'error')
-                    break  # Don't retry if DNS fails
-                except Exception:
-                    pass
-                
-                self.log(f"URL not reachable, retrying ({attempt + 1}/{max_retries})...", 'warning')
-                if attempt < max_retries - 1:
-                    time.sleep(retry_delay)
+        # SIMPLIFIED FLAGS - minimal, stable set
+        kiosk_flags = [
+            "--kiosk",
+            "--noerrdialogs",
+            "--disable-infobars",
+            "--disable-session-crashed-bubble",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--user-data-dir=/tmp/chromium-piview"
+        ]
         
-        if dns_failed:
-            self.connection_failures += 1
-            self.log(f"DNS resolution failed - browser will show 'DNS probe finished nxdomain' error", 'error')
-            self.log("Check your network connection and URL configuration", 'error')
-            # Still open browser so user can see the error
-        elif not url_reachable:
-            self.connection_failures += 1
-            self.log(f"URL not reachable after {max_retries} attempts, opening browser anyway (may show error)", 'warning')
-        else:
-            self.log(f"URL connectivity verified: {url}")
-        
-        # Build browser command with clean flag list
-        kiosk_flags = self.config["kiosk_flags"].copy()
-        
-        # If certificates are installed, use clean secure flags
-        # Otherwise, add SSL bypass flags if configured
-        if self.config.get("cert_installed", False):
-            # Certificates installed - use clean, secure flag list
-            # Remove any SSL bypass flags that might be in the base config
-            kiosk_flags = [f for f in kiosk_flags if not any(
-                f.startswith(bypass) for bypass in [
-                    "--ignore-certificate-errors",
-                    "--ignore-ssl-errors",
-                    "--allow-running-insecure-content",
-                    "--unsafely-treat-insecure-origin-as-secure",
-                    "--disable-web-security"
-                ]
-            )]
-            self.log("Using clean flag list (certificates installed)")
-        elif self.config.get("ignore_ssl_errors", True):
-            # No certs installed, but ignore SSL errors requested - add bypass flags
-            ssl_flags = [
+        # Only add SSL bypass if needed AND certs not installed
+        if not self.config.get("cert_installed", False) and \
+           self.config.get("ignore_ssl_errors", True):
+            kiosk_flags.extend([
                 "--ignore-certificate-errors",
-                "--ignore-ssl-errors",
-                "--ignore-certificate-errors-spki-list",
-                "--allow-running-insecure-content",
-                "--unsafely-treat-insecure-origin-as-secure",
-                "--disable-web-security"
-            ]
-            # Add flags that aren't already in the list
-            for flag in ssl_flags:
-                flag_name = flag.split("=")[0] if "=" in flag else flag
-                if not any(f.startswith(flag_name) for f in kiosk_flags):
-                    kiosk_flags.append(flag)
-            self.log("Using SSL bypass flags (no certificates installed)")
-        else:
-            # Standard SSL validation
-            self.log("Using standard SSL validation")
+                "--allow-insecure-localhost"
+            ])
         
-        # Fix "Exited Cleanly" nag bar - force Chromium to think it exited cleanly
+        # Note: --disable-web-security removed - causes white screens
+        
         self.fix_chromium_exit_status()
         
         cmd = [browser_cmd] + kiosk_flags + [url]
         
-        # Create environment with X server vars explicitly
-        env = os.environ.copy()
-        env['DISPLAY'] = os.environ.get('DISPLAY', ':0')
-        if 'XAUTHORITY' in os.environ:
-            env['XAUTHORITY'] = os.environ['XAUTHORITY']
-        
         try:
-            self.log(f"Launching browser: {' '.join(cmd)}")
-            self.log(f"Environment: DISPLAY={env.get('DISPLAY')}, XAUTHORITY={env.get('XAUTHORITY', 'NOT SET')}")
-            self.log(f"URL: {url}")
+            self.log(f"Launching: {browser_cmd} with {len(kiosk_flags)} flags")
             
-            # Launch with explicit environment and capture stderr for debugging
+            # Launch with clean environment
+            env = os.environ.copy()
+            env['DISPLAY'] = os.environ.get('DISPLAY', ':0')
+            if 'XAUTHORITY' in os.environ:
+                env['XAUTHORITY'] = os.environ['XAUTHORITY']
+            
             self.browser_process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -871,48 +871,28 @@ class Piview:
                 env=env
             )
             
-            # Log any immediate errors
-            time.sleep(1)  # Give it a moment to start
+            # Check for immediate failure
+            time.sleep(2)
             if self.browser_process.poll() is not None:
-                # Browser exited immediately - get error
-                stdout, stderr = self.browser_process.communicate(timeout=1)
-                if stderr:
-                    self.log(f"Browser error output: {stderr.decode('utf-8', errors='ignore')}", 'error')
-                if stdout:
-                    self.log(f"Browser stdout: {stdout.decode('utf-8', errors='ignore')}", 'error')
-                self.log(f"Browser exited immediately with code: {self.browser_process.returncode}", 'error')
+                _, stderr = self.browser_process.communicate(timeout=1)
+                error_msg = stderr.decode('utf-8', errors='ignore')[:200] if stderr else "Unknown error"
+                self.log(f"Browser died immediately: {error_msg}", 'error')
                 return False
             
-            # Record launch time (for ignoring early exits)
             self.browser_launch_time = time.time()
             
-            # Wait longer to see if it starts successfully (increased from 4s to 8s)
-            time.sleep(8)  # Give it more time to load and render
+            # Wait for browser to stabilize
+            time.sleep(5)
             
-            # Only check for immediate exit if browser has been running for at least 15 seconds
-            # This prevents false positives during the initial startup phase
-            if self.browser_process.poll() is not None:
-                exit_code = self.browser_process.returncode
-                elapsed = time.time() - self.browser_launch_time
-                if elapsed < 15:
-                    self.log(f"Browser exited during startup phase ({elapsed:.1f}s) - may be normal, will retry", 'warning')
-                    return False
-                else:
-                    self.log(f"Browser exited after startup (exit code: {exit_code}, ran for {elapsed:.1f}s)", 'error')
-                    return False
-            
-            self.log(f"Browser opened successfully: {url}")
-            
-            # SSL errors should be bypassed by flags - no need for xdotool
-            # The combination of --ignore-certificate-errors and --disable-web-security
-            # should prevent SSL warnings from appearing
-            
-            return True
-        except FileNotFoundError:
-            self.log(f"Error: Browser executable not found: {browser_cmd}", 'error')
-            return False
+            if self.browser_process.poll() is None:
+                self.log("Browser launched successfully")
+                return True
+            else:
+                self.log(f"Browser exited with code {self.browser_process.returncode}", 'error')
+                return False
+                
         except Exception as e:
-            self.log(f"Error opening browser: {e}", 'error')
+            self.log(f"Launch failed: {e}", 'error')
             return False
     
     
