@@ -443,8 +443,18 @@ echo "Creating helper scripts..."
 
 cat > "$APP_DIR/restart.sh" << 'EOF'
 #!/bin/bash
-sudo systemctl restart piview.service
-echo "Piview restarted"
+if systemctl is-system-running &>/dev/null; then
+    sudo systemctl restart piview.service 2>/dev/null && echo "Piview restarted" || {
+        echo "Could not restart via systemctl - trying manual restart"
+        pkill -f "piview.py" 2>/dev/null
+        sleep 2
+        echo "Piview stopped. Start manually with: /opt/piview/piview.py"
+    }
+else
+    echo "Systemd not available - stopping process"
+    pkill -f "piview.py" 2>/dev/null
+    echo "Piview stopped. Start manually with: /opt/piview/piview.py"
+fi
 EOF
 
 cat > "$APP_DIR/fix-chromium.sh" << 'EOF'
@@ -473,11 +483,19 @@ echo "DISPLAY: $DISPLAY"
 echo "XAUTHORITY: ${XAUTHORITY:-not set}"
 echo ""
 echo "=== Browser Process ==="
-if pgrep -f chromium > /dev/null; then
-    echo "✓ Chromium is running"
-    pgrep -af chromium | head -3
+if pgrep -f "chromium\|firefox" > /dev/null; then
+    echo "✓ Browser is running"
+    pgrep -af "chromium\|firefox" | head -3
 else
-    echo "✗ Chromium is not running"
+    echo "✗ Browser is not running"
+fi
+echo ""
+echo "=== Piview Process ==="
+if pgrep -f "piview.py" > /dev/null; then
+    echo "✓ Piview is running"
+    ps aux | grep -E "piview.py" | grep -v grep
+else
+    echo "✗ Piview is not running"
 fi
 echo ""
 echo "=== Current URL (from config) ==="
@@ -488,24 +506,53 @@ else
 fi
 echo ""
 echo "=== Service Status ==="
-sudo systemctl status piview.service --no-pager -l | head -15
+if systemctl is-system-running &>/dev/null; then
+    sudo systemctl status piview.service --no-pager -l 2>/dev/null | head -15 || echo "Could not get systemd status"
+else
+    echo "Systemd not available - process check above"
+fi
 echo ""
 echo "=== Recent Logs ==="
-sudo journalctl -u piview.service -n 10 --no-pager | tail -10
+if command -v journalctl &>/dev/null && systemctl is-system-running &>/dev/null; then
+    sudo journalctl -u piview.service -n 10 --no-pager 2>/dev/null | tail -10 || {
+        echo "journalctl unavailable - checking log file:"
+        tail -10 /var/log/piview.log 2>/dev/null || echo "Log file not found"
+    }
+else
+    if [ -f /var/log/piview.log ]; then
+        tail -10 /var/log/piview.log
+    else
+        echo "Log file not found: /var/log/piview.log"
+    fi
+fi
 EOF
 
 cat > "$APP_DIR/stop.sh" << 'EOF'
 #!/bin/bash
-sudo systemctl stop piview.service
+if systemctl is-system-running &>/dev/null; then
+    sudo systemctl stop piview.service 2>/dev/null || true
+fi
+pkill -9 -f "piview.py" 2>/dev/null || true
 pkill -9 chromium 2>/dev/null || true
 pkill -9 chromium-browser 2>/dev/null || true
+pkill -9 firefox 2>/dev/null || true
 echo "Piview stopped"
 EOF
 
 cat > "$APP_DIR/status.sh" << 'EOF'
 #!/bin/bash
 echo "=== Service Status ==="
-sudo systemctl status piview.service --no-pager -l
+if systemctl is-system-running &>/dev/null; then
+    sudo systemctl status piview.service --no-pager -l 2>/dev/null || echo "Could not get systemd status (D-Bus issue?)"
+else
+    echo "Systemd not available - checking process directly"
+    if pgrep -f "piview.py" > /dev/null; then
+        echo "✓ Piview process is running"
+        ps aux | grep -E "piview.py" | grep -v grep
+    else
+        echo "✗ Piview process not running"
+    fi
+fi
 echo ""
 echo "=== Health Status ==="
 if [ -f /tmp/piview_health.json ]; then
@@ -515,22 +562,77 @@ else
 fi
 echo ""
 echo "=== Recent Logs ==="
-sudo journalctl -u piview.service -n 20 --no-pager
+if command -v journalctl &>/dev/null && systemctl is-system-running &>/dev/null; then
+    sudo journalctl -u piview.service -n 20 --no-pager 2>/dev/null || {
+        echo "journalctl unavailable - checking log file instead:"
+        if [ -f /var/log/piview.log ]; then
+            tail -20 /var/log/piview.log
+        else
+            echo "Log file not found: /var/log/piview.log"
+        fi
+    }
+else
+    echo "journalctl not available - checking log file:"
+    if [ -f /var/log/piview.log ]; then
+        tail -20 /var/log/piview.log
+    else
+        echo "Log file not found: /var/log/piview.log"
+    fi
+fi
 EOF
 
 cat > "$APP_DIR/logs.sh" << 'EOF'
 #!/bin/bash
 # View live logs
-sudo journalctl -u piview.service -f
+if command -v journalctl &>/dev/null && systemctl is-system-running &>/dev/null; then
+    sudo journalctl -u piview.service -f 2>/dev/null || {
+        echo "journalctl unavailable - using log file instead:"
+        echo "Press Ctrl+C to stop"
+        tail -f /var/log/piview.log 2>/dev/null || echo "Log file not found: /var/log/piview.log"
+    }
+else
+    echo "journalctl not available - using log file:"
+    echo "Press Ctrl+C to stop"
+    if [ -f /var/log/piview.log ]; then
+        tail -f /var/log/piview.log
+    else
+        echo "Log file not found: /var/log/piview.log"
+        echo "Checking if piview is running:"
+        ps aux | grep -E "piview" | grep -v grep || echo "No piview process found"
+    fi
+fi
 EOF
 
 sudo chmod +x "$APP_DIR"/*.sh
 
+cat > "$APP_DIR/view-logs.sh" << 'EOF'
+#!/bin/bash
+# Alternative log viewer that works even without systemd/D-Bus
+echo "=== Piview Logs ==="
+echo ""
+if [ -f /var/log/piview.log ]; then
+    echo "Log file: /var/log/piview.log"
+    echo "Last 50 lines:"
+    echo "----------------------------------------"
+    tail -50 /var/log/piview.log
+    echo ""
+    echo "To follow live: tail -f /var/log/piview.log"
+else
+    echo "Log file not found: /var/log/piview.log"
+    echo ""
+    echo "Checking if piview is running:"
+    ps aux | grep -E "piview" | grep -v grep || echo "No piview process found"
+fi
+EOF
+
+chmod +x "$APP_DIR/view-logs.sh"
+
 echo -e "${GREEN}✓ Helper scripts installed${NC}"
 echo "  - restart.sh - Restart piview service"
 echo "  - stop.sh - Stop piview"
-echo "  - status.sh - Check status"
-echo "  - logs.sh - View logs"
+echo "  - status.sh - Check status (works without systemd)"
+echo "  - logs.sh - View logs (works without systemd)"
+echo "  - view-logs.sh - View log file directly (no systemd needed)"
 echo "  - fix-chromium.sh - Fix Chromium startup issues"
 echo "  - check-display.sh - Check display and browser status"
 
