@@ -262,8 +262,8 @@ echo ""
 exec < /dev/tty
 ask_tty_yn "Configure proxy?" PROXY_REPLY "n"
 if [[ $PROXY_REPLY =~ ^[Yy]$ ]]; then
-    ask_tty "Proxy server (e.g., http://192.168.1.30:3128/)" PROXY_SERVER ""
-    ask_tty "No proxy hosts (e.g., localhost,127.0.0.1,zoro.sba.lt)" NO_PROXY "localhost,127.0.0.1"
+    ask_tty "Proxy server (e.g., http://00.00.00.00:0000/)" PROXY_SERVER ""
+    ask_tty "No proxy hosts (e.g., localhost,127.0.0.1)" NO_PROXY ""
     CONFIGURE_PROXY="true"
 else
     CONFIGURE_PROXY="false"
