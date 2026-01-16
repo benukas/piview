@@ -286,13 +286,73 @@ else
     CERT_INSTALLED="false"
 fi
 
-# Factory settings
+# Safety Level Selection
 echo ""
-echo "Factory Settings:"
-ask_tty "Watchdog freeze threshold (seconds)" WATCHDOG_THRESHOLD "120"
-ask_tty "Auto-reboot after failures" AUTO_REBOOT_FAILURES "20"
-ask_tty "Memory limit (MB)" MEMORY_LIMIT "1500"
-ask_tty "Health endpoint port" HEALTH_PORT "8888"
+echo "=========================================================="
+echo "Safety Level Selection"
+echo "=========================================================="
+echo ""
+echo "Choose monitoring and recovery features:"
+echo ""
+echo "  1) Minimal     - Just run the browser, no monitoring"
+echo "                   • No watchdog"
+echo "                   • No memory limits"
+echo "                   • No auto-reboot"
+echo "                   • Best for: Testing, development"
+echo ""
+echo "  2) Standard    - Reliable monitoring (RECOMMENDED)"
+echo "                   • Watchdog: 5min freeze timeout"
+echo "                   • Memory limits: 1.5GB"
+echo "                   • Auto-restart browser only"
+echo "                   • Best for: Most deployments"
+echo ""
+echo "  3) Paranoid    - Maximum resilience"
+echo "                   • Watchdog: 3min freeze timeout"
+echo "                   • Memory limits: 1.5GB"
+echo "                   • Auto-reboot after 50 failures"
+echo "                   • Best for: Critical 24/7 deployments"
+echo ""
+exec < /dev/tty
+ask_tty "Safety level (1/2/3)" SAFETY_CHOICE "2"
+
+case $SAFETY_CHOICE in
+    1)
+        SAFETY_LEVEL="minimal"
+        WATCHDOG_ENABLED="false"
+        MEMORY_LIMIT_ENABLED="false"
+        AUTO_REBOOT_ENABLED="false"
+        HEALTH_ENDPOINT_ENABLED="false"
+        WATCHDOG_THRESHOLD="300"
+        WATCHDOG_CHECK_INTERVAL="60"
+        MEMORY_LIMIT="1500"
+        AUTO_REBOOT_FAILURES="50"
+        HEALTH_PORT="8888"
+        ;;
+    3)
+        SAFETY_LEVEL="paranoid"
+        WATCHDOG_ENABLED="true"
+        WATCHDOG_THRESHOLD="180"
+        WATCHDOG_CHECK_INTERVAL="30"
+        MEMORY_LIMIT_ENABLED="true"
+        AUTO_REBOOT_ENABLED="true"
+        AUTO_REBOOT_FAILURES="50"
+        HEALTH_ENDPOINT_ENABLED="true"
+        MEMORY_LIMIT="1500"
+        HEALTH_PORT="8888"
+        ;;
+    *)
+        SAFETY_LEVEL="standard"
+        WATCHDOG_ENABLED="true"
+        WATCHDOG_THRESHOLD="300"
+        WATCHDOG_CHECK_INTERVAL="60"
+        MEMORY_LIMIT_ENABLED="true"
+        AUTO_REBOOT_ENABLED="false"
+        HEALTH_ENDPOINT_ENABLED="true"
+        MEMORY_LIMIT="1500"
+        AUTO_REBOOT_FAILURES="50"
+        HEALTH_PORT="8888"
+        ;;
+esac
 
 # Create config
 echo ""
@@ -342,20 +402,33 @@ cat > "$CONFIG_DIR/config.json" << EOF
   "browser": "$BROWSER_CMD",
   "browser_type": "$BROWSER_TYPE",
   "enable_hardware_acceleration": $ENABLE_HW_ACCEL,
-  "health_check_interval": 10,
-  "max_browser_restarts": 10,
+  
+  "safety_level": "$SAFETY_LEVEL",
+  
+  "health_check_interval": 30,
+  "max_browser_restarts_per_hour": 10,
   "ignore_ssl_errors": $IGNORE_SSL,
   "cert_installed": $CERT_INSTALLED,
   "connection_retry_delay": 5,
   "max_connection_retries": 3,
-  "watchdog_enabled": true,
+  
+  "watchdog_enabled": $WATCHDOG_ENABLED,
   "watchdog_freeze_threshold": $WATCHDOG_THRESHOLD,
-  "auto_reboot_enabled": true,
-  "auto_reboot_after_failures": $AUTO_REBOOT_FAILURES,
+  "watchdog_check_interval": $WATCHDOG_CHECK_INTERVAL,
+  
+  "memory_limit_enabled": $MEMORY_LIMIT_ENABLED,
   "memory_limit_mb": $MEMORY_LIMIT,
+  
+  "auto_reboot_enabled": $AUTO_REBOOT_ENABLED,
+  "auto_reboot_after_failures": $AUTO_REBOOT_FAILURES,
+  
+  "health_endpoint_enabled": $HEALTH_ENDPOINT_ENABLED,
+  "health_endpoint_port": $HEALTH_PORT,
+  
+  "disk_cleanup_enabled": true,
   "disk_space_warning_mb": 500,
   "log_rotation_size_mb": 10,
-  "health_endpoint_port": $HEALTH_PORT,
+  
   "kiosk_flags": $KIOSK_FLAGS_JSON
 }
 EOF
